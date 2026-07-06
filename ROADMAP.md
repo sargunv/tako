@@ -121,6 +121,8 @@ tako/
 ├── kcfg/               # takorc.kcfg schema + .kcfgc codegen
 ├── data/               # .desktop, metainfo, icons, D-Bus service file
 └── src/main.rs         # loads QML, starts D-Bus server, drives the model
+                        # (currently lives in crates/tako-app; the workspace root
+                        #  is a pure Cargo workspace manifest)
 ```
 
 ---
@@ -566,18 +568,19 @@ something dogfoodable.
 
 ### Phase 0 — Render spike & stack proof _(~1–2 weeks, GO/NO-GO)_
 
-- cxx-qt hello world: one QML window calling into Rust.
-- `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
-- Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in a
-  `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per font.
-- Measure type-to-pixel latency. Target < 16 ms, no dropped frames under `yes` /
-  `cat big.log`.
-- Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject` →
-  `rustybuzz`+`ab_glyph` if freetype/harfbuzz binding is painful →
-  `alacritty_terminal` as a last-resort terminal core if libghostty-vt ABI churn
-  is unmanageable.
-- **Gate:** latency acceptable → continue. Not → re-scope before further
-  investment.
+- [x] cxx-qt hello world: one QML window calling into Rust.
+- [ ] `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
+- [ ] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
+      a `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per
+      font.
+- [ ] Measure type-to-pixel latency. Target < 16 ms, no dropped frames under
+      `yes` / `cat big.log`.
+- [ ] Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject` →
+      `rustybuzz`+`ab_glyph` if freetype/harfbuzz binding is painful →
+      `alacritty_terminal` as a last-resort terminal core if libghostty-vt ABI
+      churn is unmanageable.
+- [ ] **Gate:** latency acceptable → continue. Not → re-scope before further
+      investment.
 
 ### Phase 1 — Working native terminal _(~3–5 weeks)_
 

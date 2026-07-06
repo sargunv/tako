@@ -20,11 +20,9 @@ tako/
 │   ├── tako-hooks/     agent hook installers + state machine
 │   ├── tako-session/   serde snapshot to ~/.local/state/tako/ (XDG paths)
 │   ├── tako-config/    KConfig bridge + ghostty config reader + project JSON
-│   └── tako-app/       cxx-qt bridge: registers Rust model to QML
-├── qml/                (future) sidebar, tabs, splits, notification panel
+│   └── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
 ├── kcfg/               (future) takorc.kcfg schema + .kcfgc codegen
 ├── data/               (future) .desktop, metainfo, icons, D-Bus service file
-├── src/main.rs         loads QML, starts D-Bus server, drives the model
 ├── ROADMAP.md          the authoritative design document
 └── cmux/               (gitignored) product reference checkout
 ```
@@ -41,6 +39,8 @@ The project uses [mise](https://mise.jdx.dev) to bootstrap the toolchain
 - `mise run check` — run `hk check --all` (dprint check + cargo clippy).
 - `mise run fix` — run `hk fix --all` (dprint fmt + cargo clippy --fix).
 - `cargo build` / `cargo test` — usual Rust workspace commands.
+- `cargo run -p tako-app` — launch the Tako window (Phase 0 spike). Requires Qt6
+  `-devel` packages on the host and an active Plasma/ graphical session.
 
 Native system libraries (Qt6/KDE Frameworks, freetype, harfbuzz, fontconfig) are
 expected from the host for now; pixi/conda-forge packaging is deferred.
@@ -48,3 +48,12 @@ expected from the host for now; pixi/conda-forge packaging is deferred.
 ## Project invariants
 
 <!-- List non-negotiable rules for the project as they emerge. -->
+
+- **`unsafe_code` is denied workspace-wide.** The only permitted exception is a
+  cxx-qt `#[cxx_qt::bridge]` module, which needs `unsafe extern` blocks (edition
+  2024 FFI syntax). Scope the relaxation with a module-level
+  `#![allow(unsafe_code)]` inside the bridge file only — never relax at crate or
+  workspace level.
+- **Qt is discovered via `qmake` on PATH.** `mise.toml` sets
+  `QT_VERSION_MAJOR=6` so cxx-qt-build picks the Qt6 `qmake6`. Keep that env var
+  when adding any Qt-linking crate.

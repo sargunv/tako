@@ -1,2 +1,6 @@
 cmux/
+
 /target
+
+# cxx-qt-build: regenerated per-build, contains an absolute build path
+**/.qmlls.ini

@@ -1,3 +1,34 @@
 //! cxx-qt bridge: registers Rust model to QML, main entry.
 //!
-//! See ROADMAP.md §2.3.
+//! See ROADMAP.md §2.3 and the Phase 0 spike (§12).
+
+pub mod qobject;
+
+use cxx_qt::casting::Upcast;
+use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QUrl};
+use std::pin::Pin;
+
+/// Boot the Qt application: create the GUI, load the QML module, and run the
+/// event loop. This is the Phase 0 §1 smoke test — one QML window calling into
+/// Rust.
+pub fn run() {
+    let mut app = QGuiApplication::new();
+    let mut engine = QQmlApplicationEngine::new();
+
+    if let Some(engine) = engine.as_mut() {
+        engine.load(&QUrl::from("qrc:/qt/qml/org/tako/qml/main.qml"));
+    }
+
+    if let Some(engine) = engine.as_mut() {
+        let engine: Pin<&mut QQmlEngine> = engine.upcast_pin();
+        engine
+            .on_quit(|_| {
+                println!("tako: QML quit");
+            })
+            .release();
+    }
+
+    if let Some(app) = app.as_mut() {
+        app.exec();
+    }
+}

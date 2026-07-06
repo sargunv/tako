@@ -15,5 +15,10 @@ run = "hk check --all"
 [tasks.fix]
 run = "hk fix --all"
 
+[env]
+# cxx-qt-build discovers Qt via `qmake` on PATH; pin the major version so the
+# Qt6 qmake wins over any lingering Qt5.
+QT_VERSION_MAJOR = "6"
+
 [hooks]
 postinstall = ["hk install --mise"]

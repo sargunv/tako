@@ -1,13 +1,3 @@
-[package]
-name = "tako"
-version = "0.1.0"
-edition = "2024"
-license = "GPL-3.0-or-later"
-description = "A native KDE terminal for AI coding agents."
-
-[dependencies]
-tako-app = { path = "crates/tako-app" }
-
 [workspace]
 resolver = "3"
 members = [
