@@ -1,0 +1,19 @@
+{
+  "$schema": "https://dprint.dev/schemas/v0.json",
+  "lineWidth": 80,
+  "indentWidth": 2,
+  "useTabs": false,
+  "newLineKind": "lf",
+  "json": { "preferSingleLine": true },
+  "markdown": { "textWrap": "always" },
+  "exec": {
+    "commands": [{ "command": "rustfmt --edition 2024", "exts": ["rs"] }]
+  },
+  "plugins": [
+    "https://plugins.dprint.dev/json-0.22.0.wasm",
+    "https://plugins.dprint.dev/markdown-0.22.1.wasm",
+    "https://plugins.dprint.dev/toml-0.7.0.wasm",
+    "https://plugins.dprint.dev/g-plane/pretty_yaml-v0.6.0.wasm",
+    "https://plugins.dprint.dev/exec-0.7.2.json@6c30bd00dfb176774ece412d0fbf149478269ecc92c55ab2d6f4116938ed993e"
+  ]
+}

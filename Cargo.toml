@@ -1,0 +1,40 @@
+[package]
+name = "tako"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "A native KDE terminal for AI coding agents."
+
+[dependencies]
+tako-app = { path = "crates/tako-app" }
+
+[workspace]
+resolver = "3"
+members = [
+  "crates/tako-app",
+  "crates/tako-bonsplit",
+  "crates/tako-cli",
+  "crates/tako-config",
+  "crates/tako-dbus",
+  "crates/tako-git",
+  "crates/tako-hooks",
+  "crates/tako-model",
+  "crates/tako-net",
+  "crates/tako-notify",
+  "crates/tako-render",
+  "crates/tako-session",
+  "crates/tako-term",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+cargo_common_metadata = "allow"

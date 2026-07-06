@@ -1,0 +1,12 @@
+[package]
+name = "tako-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "gix-based branch/dirty/index + inotify; reqwest PR polling."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

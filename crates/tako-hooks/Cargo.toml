@@ -1,0 +1,12 @@
+[package]
+name = "tako-hooks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "agent hook installers + hook-session store + state machine."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

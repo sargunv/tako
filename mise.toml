@@ -1,0 +1,19 @@
+[settings]
+experimental = true
+pin = true
+minimum_release_age = "3d"
+lockfile = true
+
+[tools]
+"aqua:dprint/dprint" = "0.55.1"
+"aqua:jdx/hk" = "1.49.0"
+"core:rust" = { version = "1.96.1", profile = "minimal", components = "rustfmt,clippy" }
+
+[tasks.check]
+run = "hk check --all"
+
+[tasks.fix]
+run = "hk fix --all"
+
+[hooks]
+postinstall = ["hk install --mise"]

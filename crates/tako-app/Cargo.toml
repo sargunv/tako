@@ -1,0 +1,12 @@
+[package]
+name = "tako-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "cxx-qt bridge: registers Rust model to QML, main entry."
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
