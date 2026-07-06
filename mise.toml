@@ -8,6 +8,7 @@ lockfile = true
 "aqua:dprint/dprint" = "0.55.1"
 "aqua:jdx/hk" = "1.49.0"
 "core:rust" = { version = "1.96.1", profile = "minimal", components = "rustfmt,clippy" }
+zig = "0.15.2"
 
 [tasks.check]
 run = "hk check --all"

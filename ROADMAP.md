@@ -569,7 +569,7 @@ something dogfoodable.
 ### Phase 0 — Render spike & stack proof _(~1–2 weeks, GO/NO-GO)_
 
 - [x] cxx-qt hello world: one QML window calling into Rust.
-- [ ] `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
+- [x] `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
 - [ ] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
       a `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per
       font.
@@ -688,16 +688,16 @@ something dogfoodable.
 
 ## 14. Open decisions
 
-| Decision                                                          | Default                                  | Revisit when                                |
-| ----------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------- |
-| Pin ghostty commit for libghostty-vt                              | latest stable at Phase 0 start           | each Tako release                           |
-| Project-scoped config location                                    | `.tako/tako.json` (cmux compat inverted) | before v1                                   |
-| Custom-sidebar interpreter (cmux's data-driven sidebar extension) | Defer                                    | after v1; it's an additive extension point  |
-| PATH-shim wrappers for Claude/Codex                               | Yes, in Phase 3                          | —                                           |
-| Feed (inline two-way approval cards)                              | Defer                                    | when users want Approve/Deny in Tako itself |
-| Browser pane bundling                                             | Optional/plugin                          | Phase 8                                     |
-| SSH work                                                          | Reuse cmuxd-remote vs Rust rewrite       | Phase 9                                     |
-| KCM in System Settings                                            | Ship, don't ship                         | Phase 6                                     |
+| Decision                                                          | Default                                                                                                                                                            | Revisit when                                |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- |
+| Pin ghostty commit for libghostty-vt                              | upstream `main` commit at Phase 0 start (v1.3.1 stable lacks the full C API — no `render.h`/`terminal.h`, no static-lib build; those landed on `main` post-v1.3.1) | each Tako release                           |
+| Project-scoped config location                                    | `.tako/tako.json` (cmux compat inverted)                                                                                                                           | before v1                                   |
+| Custom-sidebar interpreter (cmux's data-driven sidebar extension) | Defer                                                                                                                                                              | after v1; it's an additive extension point  |
+| PATH-shim wrappers for Claude/Codex                               | Yes, in Phase 3                                                                                                                                                    | —                                           |
+| Feed (inline two-way approval cards)                              | Defer                                                                                                                                                              | when users want Approve/Deny in Tako itself |
+| Browser pane bundling                                             | Optional/plugin                                                                                                                                                    | Phase 8                                     |
+| SSH work                                                          | Reuse cmuxd-remote vs Rust rewrite                                                                                                                                 | Phase 9                                     |
+| KCM in System Settings                                            | Ship, don't ship                                                                                                                                                   | Phase 6                                     |
 
 ---
 
