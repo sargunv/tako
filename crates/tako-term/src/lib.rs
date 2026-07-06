@@ -3,6 +3,11 @@
 //! See ROADMAP.md §2.3 and §4. Bindings for the pinned upstream
 //! ghostty-org/ghostty `libghostty-vt` C API are generated at build time by
 //! `build.rs` (see `OUT_DIR/bindings.rs`).
+//!
+//! The safe surface for Phase 0 §3 lives in [`terminal`], [`snapshot`], and
+//! [`pty`]: spawn a PTY, feed bytes into a [`terminal::Terminal`], snapshot a
+//! [`snapshot::FrameSnapshot`] from a [`terminal::RenderState`], then hand the
+//! snapshot to a renderer.
 
 // bindgen emits raw FFI (extern "C", pointers, unsafe fns) and unidiomatic C
 // names. The unsafe relaxation is crate-scoped; the workspace `unsafe_code =
@@ -13,6 +18,37 @@
 pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+
+pub mod pty;
+pub mod snapshot;
+pub mod terminal;
+
+use core::fmt;
+
+/// A failed libghostty-vt call. Wraps the raw `GhosttyResult` code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error {
+    pub code: ffi::GhosttyResult,
+}
+
+impl Error {
+    /// Assert-style helper: turns a non-`GHOSTTY_SUCCESS` result into `Err`.
+    pub fn from_result(code: ffi::GhosttyResult) -> Result<(), Self> {
+        if code == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+            Ok(())
+        } else {
+            Err(Self { code })
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "libghostty-vt error code {}", self.code)
+    }
+}
+
+impl std::error::Error for Error {}
 
 use ffi::{GhosttyBuildInfo, GhosttyResult, ghostty_build_info};
 

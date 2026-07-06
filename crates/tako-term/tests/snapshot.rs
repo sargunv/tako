@@ -1,0 +1,89 @@
+//! Phase 0 §3 Step A: snapshot walker roundtrip with literal VT bytes.
+//!
+//! Mirrors the `c-vt-render` embedding contract: feed styled content, capture a
+//! frame, and assert the cells, styles, and resolved colors come back correctly.
+
+use tako_term::snapshot::{Dirty, FrameSnapshot};
+use tako_term::terminal::{RenderState, Terminal};
+
+/// Concatenate all graphemes in a row.
+fn row_text(row: &tako_term::snapshot::Row) -> String {
+    row.cells.iter().map(|c| c.grapheme.as_str()).collect()
+}
+
+fn fresh_terminal() -> (Terminal, RenderState) {
+    let t = Terminal::new(40, 5, 10_000).expect("terminal_new");
+    let r = RenderState::new().expect("render_state_new");
+    (t, r)
+}
+
+#[test]
+fn captures_styled_content_and_resolves_colors() {
+    let (mut t, mut rs) = fresh_terminal();
+    // bold green "world", then reset
+    t.vt_write(b"Hello, \x1b[1;32mworld\x1b[0m!");
+
+    let snap = FrameSnapshot::capture(&mut t, &mut rs);
+    assert_eq!(snap.cols, 40);
+    assert_eq!(snap.rows, 5);
+    assert_eq!(
+        snap.dirty,
+        Dirty::Full,
+        "first frame after writes should be full-dirty"
+    );
+
+    let row0 = &snap.rows_data[0];
+    assert!(row0.dirty, "row 0 should be marked dirty");
+    assert_eq!(row_text(row0), "Hello, world!");
+
+    // Columns 7..12 are "world" — they must be bold with fg = palette[2] (green).
+    let green = snap.colors.palette[2];
+    for cell in &row0.cells[7..12] {
+        assert!(
+            cell.style.bold,
+            "world cell {:?} should be bold",
+            cell.grapheme
+        );
+        assert_eq!(
+            cell.fg,
+            Some(green),
+            "world cell {:?} should resolve to palette[2]",
+            cell.grapheme
+        );
+    }
+    // Non-world cells are not bold.
+    assert!(!row0.cells[0].style.bold, "'H' should not be bold");
+}
+
+#[test]
+fn dirty_resets_after_clear_and_no_changes() {
+    let (mut t, mut rs) = fresh_terminal();
+    t.vt_write(b"something");
+
+    let snap1 = FrameSnapshot::capture(&mut t, &mut rs);
+    assert_ne!(snap1.dirty, Dirty::False, "must be dirty after writes");
+
+    rs.clear_dirty().expect("clear_dirty");
+
+    // No new writes between captures → render_state_update finds nothing.
+    let snap2 = FrameSnapshot::capture(&mut t, &mut rs);
+    assert_eq!(
+        snap2.dirty,
+        Dirty::False,
+        "dirty should be False after clear with no new writes"
+    );
+}
+
+#[test]
+fn cursor_is_visible_after_writes() {
+    let (mut t, mut rs) = fresh_terminal();
+    t.vt_write(b"ab");
+    let snap = FrameSnapshot::capture(&mut t, &mut rs);
+    assert!(snap.cursor.visible, "cursor should be visible");
+    let (cx, cy) = snap
+        .cursor
+        .viewport
+        .expect("cursor should be in viewport after writes");
+    assert_eq!(cx, 2, "cursor column after 'ab' should be 2");
+    assert_eq!(cy, 0, "cursor row should be 0");
+}

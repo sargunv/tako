@@ -8,6 +8,9 @@ description = "libghostty-vt bindgen wrapper, PTY bridge, OSC dispatch."
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+portable-pty = "0.8"
+
 [build-dependencies]
 bindgen = "0.71"
 
