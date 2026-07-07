@@ -330,6 +330,12 @@ impl Surface {
         };
 
         let fg_default = snap.colors.foreground;
+        let default_fg = (fg_default.r, fg_default.g, fg_default.b);
+        let default_bg = (
+            snap.colors.background.r,
+            snap.colors.background.g,
+            snap.colors.background.b,
+        );
         let mut verts: Vec<Vertex> = Vec::new();
 
         // Push a textured quad (two triangles, 4 vertices) in pixel space.
@@ -393,19 +399,65 @@ impl Surface {
             let row_y = row_i as f32 * ch;
             let baseline = row_y + ascent as f32;
             for (col_i, cell) in row.cells.iter().enumerate() {
+                let col_x = col_i as f32 * cw;
+
+                // Resolve effective fg/bg. `cell.fg`/`cell.bg` are None when
+                // the cell has no explicit color → fall back to the terminal
+                // defaults. Inverse (SGR 7) swaps the two; applied here rather
+                // than in ghostty-vt so the rest of the pipeline sees final
+                // colors. Reference: ghostling main.c `render_terminal`.
+                let raw_fg = match cell.fg {
+                    Some(c) => (c.r, c.g, c.b),
+                    None => default_fg,
+                };
+                let raw_bg = match cell.bg {
+                    Some(c) => (c.r, c.g, c.b),
+                    None => default_bg,
+                };
+                let (eff_fg, eff_bg) = if cell.style.inverse {
+                    (raw_bg, raw_fg)
+                } else {
+                    (raw_fg, raw_bg)
+                };
+                // Faint (SGR 2): halve foreground intensity.
+                // TODO(bold/italic/underline): style.bold needs a bold face
+                // variant; italic needs an italic face; underline/strikethrough
+                // need line primitives. All deferred.
+                let eff_fg = if cell.style.faint {
+                    (eff_fg.0 / 2, eff_fg.1 / 2, eff_fg.2 / 2)
+                } else {
+                    eff_fg
+                };
+
+                // Background quad for cells whose effective bg differs from
+                // the terminal default (the FBO was cleared to default_bg, so
+                // default-bg cells need no quad). Drawn before the glyph so the
+                // glyph composites over it within the cell. Samples the white
+                // texel → coverage 1.0 → flat opaque color.
+                if eff_bg != default_bg {
+                    push_quad(
+                        col_x,
+                        row_y,
+                        cw,
+                        ch,
+                        self.white_u,
+                        self.white_v,
+                        self.white_u,
+                        self.white_v,
+                        eff_bg,
+                    );
+                }
+
                 if cell.grapheme.is_empty() {
                     continue;
                 }
-                let fg = match cell.fg {
-                    Some(c) => (c.r, c.g, c.b),
-                    None => (fg_default.r, fg_default.g, fg_default.b),
-                };
+
                 let shaped = self
                     .shape_cache
                     .get(&cell.grapheme)
                     .cloned()
                     .unwrap_or_default();
-                let mut pen_x = col_i as f32 * cw;
+                let mut pen_x = col_x;
                 for sg in shaped {
                     if let Some(rect) = self.atlas.glyphs.get(&sg.glyph_id)
                         && rect.w > 0
@@ -422,7 +474,7 @@ impl Surface {
                             rect.y as f32 * inv_h,
                             (rect.x + rect.w) as f32 * inv_w,
                             (rect.y + rect.h) as f32 * inv_h,
-                            fg,
+                            eff_fg,
                         );
                     }
                     pen_x += sg.x_advance;
