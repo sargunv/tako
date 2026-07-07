@@ -51,10 +51,12 @@ uniform sampler2D u_atlas;
 varying vec2 v_uv;
 varying vec4 v_color;
 void main() {
-    // Atlas is single-channel grayscale; sample red as glyph coverage and
-    // modulate the per-vertex color. Background/cursor quads sample the white
-    // texel (coverage = 1.0) and so render as flat opaque color.
-    float coverage = texture2D(u_atlas, v_uv).r;
+    // Glyph quads sample the atlas for coverage; flat-color quads (cell
+    // backgrounds, cursor) emit a sentinel UV of (-1, -1) and skip the
+    // texture fetch entirely, synthesizing coverage 1.0. The branch is
+    // uniform within any single quad (all 4 vertices share the same UV),
+    // so there's no fragment-level divergence.
+    float coverage = (v_uv.x < 0.0) ? 1.0 : texture2D(u_atlas, v_uv).r;
     gl_FragColor = vec4(v_color.rgb, v_color.a * coverage);
 }
 "#;

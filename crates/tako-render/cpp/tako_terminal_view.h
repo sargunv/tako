@@ -30,7 +30,6 @@ struct TakoFramePlan {
     uint32_t atlas_w, atlas_h;
     const uint8_t *atlas_pixels;
     uint64_t atlas_generation;
-    float white_u, white_v;
 };
 
 class TakoTerminalRenderer;

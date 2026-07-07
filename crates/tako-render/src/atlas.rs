@@ -118,12 +118,7 @@ impl GlyphAtlas {
         let mut ids: Vec<u32> = bitmaps.keys().copied().collect();
         ids.sort_by_key(|g| std::cmp::Reverse(bitmaps[g].height));
 
-        // Pixel (0, 0) is reserved as a permanent white texel (coverage=1.0)
-        // so the renderer can draw flat-color background and cursor quads
-        // using the same shader/texture as glyphs — no second texture needed.
-        // Glyph packing therefore starts at column 1 on the first row; later
-        // rows wrap back to column 0 (the white texel only lives at y=0).
-        let mut x = 1u32;
+        let mut x = 0u32;
         let mut y = 0u32;
         let mut row_h = 0u32;
 
@@ -175,9 +170,6 @@ impl GlyphAtlas {
 
         let height = (y + row_h).max(1);
         let mut pixels = vec![0u8; (ATLAS_WIDTH * height) as usize];
-        // White texel at (0, 0) — sampled by flat-color quads (bg, cursor) for
-        // full coverage. See the pack() doc comment above.
-        pixels[0] = 255;
         for (gid, px, py) in placements {
             let bm = &bitmaps[&gid];
             for r in 0..bm.height {

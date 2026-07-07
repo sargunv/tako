@@ -72,10 +72,6 @@ pub struct FramePlan {
     /// (shelf-pack reuses space within the same canvas). The renderer
     /// re-uploads the texture whenever this changes.
     pub atlas_generation: u64,
-    /// UV of the permanent white texel at atlas pixel (0, 0). Flat-color quads
-    /// (background, cursor) sample here for full coverage.
-    pub white_u: f32,
-    pub white_v: f32,
 }
 
 impl Default for FramePlan {
@@ -92,8 +88,6 @@ impl Default for FramePlan {
             atlas_h: 0,
             atlas_pixels: ptr::null(),
             atlas_generation: 0,
-            white_u: 0.0,
-            white_v: 0.0,
         }
     }
 }
@@ -121,11 +115,6 @@ pub struct Surface {
     /// Bumped every time `atlas` is reassigned, so the renderer can detect
     /// content changes that don't alter dimensions (shelf-pack repacking).
     atlas_generation: u64,
-    /// UV of the permanent white texel at atlas pixel (0, 0). Flat-color quads
-    /// (background, cursor) sample here for full coverage. Recomputed on each
-    /// atlas rebuild because dimensions (and thus the UV) can change.
-    white_u: f32,
-    white_v: f32,
     glyph_advance: HashMap<u32, f32>,
     /// Rasterize-once cache keyed by glyph id, shared across atlas rebuilds so
     /// FreeType never rasterizes the same glyph twice.
@@ -175,7 +164,6 @@ impl Surface {
         // declared alongside so we can move it into Self below.
         let mut raster_cache: HashMap<u32, GlyphBitmap> = HashMap::new();
         let atlas = GlyphAtlas::from_glyph_advances(&font, &HashMap::new(), &mut raster_cache);
-        let (white_u, white_v) = white_texel_uv(&atlas);
 
         let autorun = std::env::var("TAKO_AUTORUN").ok().map(|cmd| Autorun {
             start: Instant::now(),
@@ -199,8 +187,6 @@ impl Surface {
             rows,
             atlas,
             atlas_generation: 0,
-            white_u,
-            white_v,
             glyph_advance: HashMap::new(),
             raster_cache,
             shape_cache: HashMap::new(),
@@ -224,16 +210,18 @@ impl Surface {
         }
         self.dpr = dpr;
         let physical_px = physical_font_size(self.logical_pixel_height, dpr);
-        if let Err(e) = FontFace::from_path(&self.font_path, physical_px) {
-            eprintln!("[surface] font reload at dpr {dpr} (phys {physical_px}) failed: {e}");
-            return;
-        } else {
-            self.font = FontFace::from_path(&self.font_path, physical_px)
-                .expect("font re-load succeeded above");
+        match FontFace::from_path(&self.font_path, physical_px) {
+            Ok(font) => {
+                self.font = font;
+                self.cell = self.font.cell_metrics();
+            }
+            Err(e) => {
+                eprintln!("[surface] font reload at dpr {dpr} (phys {physical_px}) failed: {e}");
+                return;
+            }
         }
-        self.cell = self.font.cell_metrics();
         // Invalidate all size-dependent caches: glyph x_advance (scaled by px),
-        // rasterized bitmaps, shaped advances, the packed atlas + its white UV.
+        // rasterized bitmaps, shaped advances, the packed atlas.
         self.glyph_advance.clear();
         self.raster_cache.clear();
         self.shape_cache.clear();
@@ -241,7 +229,6 @@ impl Surface {
         self.atlas =
             GlyphAtlas::from_glyph_advances(&self.font, &HashMap::new(), &mut self.raster_cache);
         self.atlas_generation = self.atlas_generation.wrapping_add(1);
-        (self.white_u, self.white_v) = white_texel_uv(&self.atlas);
     }
 
     pub fn cols(&self) -> u16 {
@@ -377,7 +364,6 @@ impl Surface {
             self.atlas =
                 GlyphAtlas::from_glyph_advances(&self.font, &advance, &mut self.raster_cache);
             self.atlas_generation = self.atlas_generation.wrapping_add(1);
-            (self.white_u, self.white_v) = white_texel_uv(&self.atlas);
         }
         self.glyph_advance = advance;
         let t_shape = Instant::now();
@@ -498,19 +484,11 @@ impl Surface {
                 // Background quad for cells whose effective bg differs from
                 // the terminal default (the FBO was cleared to default_bg, so
                 // default-bg cells need no quad). Drawn before the glyph so the
-                // glyph composites over it within the cell. Samples the white
-                // texel → coverage 1.0 → flat opaque color.
+                // glyph composites over it within the cell. Sentinel UV
+                // (-1,-1) signals the shader to synthesize coverage 1.0.
                 if eff_bg != default_bg {
                     push_quad(
-                        col_x,
-                        row_y,
-                        cw,
-                        ch,
-                        self.white_u,
-                        self.white_v,
-                        self.white_u,
-                        self.white_v,
-                        eff_bg,
+                        col_x, row_y, cw, ch, FLAT_UV, FLAT_UV, FLAT_UV, FLAT_UV, eff_bg,
                     );
                 }
 
@@ -549,7 +527,7 @@ impl Surface {
         }
 
         // Cursor: drawn last so it layers on top of any glyph beneath it.
-        // Samples the white texel for full coverage → a flat-color quad.
+        // Sentinel UV (-1,-1) signals the shader to synthesize coverage 1.0.
         if let Some((cx, cy)) = snap.cursor.viewport
             && snap.cursor.visible
         {
@@ -559,10 +537,10 @@ impl Surface {
                 cy as f32 * ch,
                 cw,
                 ch,
-                self.white_u,
-                self.white_v,
-                self.white_u,
-                self.white_v,
+                FLAT_UV,
+                FLAT_UV,
+                FLAT_UV,
+                FLAT_UV,
                 (color.r, color.g, color.b),
             );
         }
@@ -608,8 +586,6 @@ impl Surface {
                 ptr::null()
             },
             atlas_generation: self.atlas_generation,
-            white_u: self.white_u,
-            white_v: self.white_v,
         }
     }
 }
@@ -623,21 +599,11 @@ fn physical_font_size(logical_pixel_height: u32, dpr: f32) -> u32 {
     p.max(1)
 }
 
-/// UV at the center of the white texel (atlas pixel (0, 0)). Sampling the
-/// center avoids bleeding into neighboring glyphs under bilinear filtering.
-fn white_texel_uv(atlas: &GlyphAtlas) -> (f32, f32) {
-    let u = if atlas.width > 0 {
-        0.5 / atlas.width as f32
-    } else {
-        0.0
-    };
-    let v = if atlas.height > 0 {
-        0.5 / atlas.height as f32
-    } else {
-        0.0
-    };
-    (u, v)
-}
+/// Sentinel UV emitted for flat-color quads (cell backgrounds, cursor). The
+/// shader checks `v_uv.x < 0.0` and synthesizes coverage 1.0 (no texture
+/// fetch), so these quads render as opaque color without needing a dedicated
+/// texel in the glyph atlas.
+const FLAT_UV: f32 = -1.0;
 
 /// Resolve the system default monospace font path via fontconfig (`fc-match`).
 fn resolve_default_font() -> Result<String, String> {
