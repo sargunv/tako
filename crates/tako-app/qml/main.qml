@@ -11,7 +11,7 @@ ApplicationWindow {
     width: 900
     height: 480
     visible: true
-    title: qsTr("Tako — Phase 1 P2 colored render")
+    title: qsTr("Tako — Phase 1 P4 hidpi")
     color: palette.window
 
     // The live libghostty-vt terminal. Click to focus, then type.
@@ -23,7 +23,7 @@ ApplicationWindow {
     }
 
     Label {
-        text: qsTr("Phase 1 P2: per-cell color (fg+bg+inverse/faint). Resize/hidpi next.")
+        text: qsTr("Phase 1 P4: hidpi rasterization. Effects/encoders next.")
         color: palette.text
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter

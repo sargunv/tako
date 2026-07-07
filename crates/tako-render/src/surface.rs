@@ -133,16 +133,29 @@ pub struct Surface {
     shape_cache: HashMap<String, Vec<ShapedGlyph>>,
     vertex_buf: Vec<Vertex>,
     autorun: Option<Autorun>,
+    /// Resolved font file path (kept so the font can be reloaded on DPR change).
+    font_path: String,
+    /// Logical (DIP) font size the user requested. The actual rasterized size
+    /// is `logical_pixel_height × dpr` so glyphs stay crisp on hidpi displays.
+    logical_pixel_height: u32,
+    /// Device pixel ratio of the screen hosting this surface. Changing it (via
+    /// [`Surface::set_dpr`]) reloads the font at the new physical size and
+    /// invalidates size-dependent caches.
+    dpr: f32,
 }
 
 impl Surface {
     /// Spawn a shell on a PTY and load `font_path` (or the system default
-    /// monospace if `font_path` is `None`) at `pixel_height`.
+    /// monospace if `font_path` is `None`) at the logical `pixel_height`,
+    /// rasterized at `dpr × pixel_height` physical pixels for hidpi sharpness.
+    /// `dpr` is the device pixel ratio of the screen hosting this surface;
+    /// change it later via [`Surface::set_dpr`].
     pub fn new(
         cols: u16,
         rows: u16,
         font_path: Option<&str>,
-        pixel_height: u32,
+        logical_pixel_height: u32,
+        dpr: f32,
     ) -> Result<Self, String> {
         let terminal =
             Terminal::new(cols, rows, 10_000).map_err(|e| format!("terminal_new: {e}"))?;
@@ -153,14 +166,16 @@ impl Surface {
             Some(p) => p.to_string(),
             None => resolve_default_font()?,
         };
+        let physical_px = physical_font_size(logical_pixel_height, dpr);
         let font =
-            FontFace::from_path(path, pixel_height).map_err(|e| format!("font load: {e}"))?;
+            FontFace::from_path(&path, physical_px).map_err(|e| format!("font load: {e}"))?;
         let cell = font.cell_metrics();
 
         // Empty atlas to start; filled on the first tick. raster_cache is
         // declared alongside so we can move it into Self below.
         let mut raster_cache: HashMap<u32, GlyphBitmap> = HashMap::new();
         let atlas = GlyphAtlas::from_glyph_advances(&font, &HashMap::new(), &mut raster_cache);
+        let (white_u, white_v) = white_texel_uv(&atlas);
 
         let autorun = std::env::var("TAKO_AUTORUN").ok().map(|cmd| Autorun {
             start: Instant::now(),
@@ -184,14 +199,49 @@ impl Surface {
             rows,
             atlas,
             atlas_generation: 0,
-            white_u: 0.0,
-            white_v: 0.0,
+            white_u,
+            white_v,
             glyph_advance: HashMap::new(),
             raster_cache,
             shape_cache: HashMap::new(),
             vertex_buf: Vec::new(),
             autorun,
+            font_path: path,
+            logical_pixel_height,
+            dpr,
         })
+    }
+
+    /// Reload the font at a new device-pixel ratio, invalidating all
+    /// size-dependent caches. The caller should follow this with
+    /// [`Surface::resize_to_pixels`] (passing the current physical item size)
+    /// so the grid reflows to the new cell metrics.
+    ///
+    /// No-op when `dpr` is within 0.01 of the current value.
+    pub fn set_dpr(&mut self, dpr: f32) {
+        if (dpr - self.dpr).abs() < 0.01 {
+            return;
+        }
+        self.dpr = dpr;
+        let physical_px = physical_font_size(self.logical_pixel_height, dpr);
+        if let Err(e) = FontFace::from_path(&self.font_path, physical_px) {
+            eprintln!("[surface] font reload at dpr {dpr} (phys {physical_px}) failed: {e}");
+            return;
+        } else {
+            self.font = FontFace::from_path(&self.font_path, physical_px)
+                .expect("font re-load succeeded above");
+        }
+        self.cell = self.font.cell_metrics();
+        // Invalidate all size-dependent caches: glyph x_advance (scaled by px),
+        // rasterized bitmaps, shaped advances, the packed atlas + its white UV.
+        self.glyph_advance.clear();
+        self.raster_cache.clear();
+        self.shape_cache.clear();
+        self.vertex_buf.clear();
+        self.atlas =
+            GlyphAtlas::from_glyph_advances(&self.font, &HashMap::new(), &mut self.raster_cache);
+        self.atlas_generation = self.atlas_generation.wrapping_add(1);
+        (self.white_u, self.white_v) = white_texel_uv(&self.atlas);
     }
 
     pub fn cols(&self) -> u16 {
@@ -202,6 +252,34 @@ impl Surface {
     }
     pub fn cell(&self) -> CellMetrics {
         self.cell
+    }
+
+    /// Resize the terminal grid to fit `width_px × height_px` (in current
+    /// cell-metric units; DIPs pre-P4, physical px post-P4). Computes cols/rows
+    /// from the cell metrics, resizes both the libghostty-vt terminal and the
+    /// PTY (so the child sees `SIGWINCH`), and updates internal fields. No-op
+    /// if the computed size matches the current one (avoids resize storms on
+    /// sub-cell window motion during drag).
+    pub fn resize_to_pixels(&mut self, width_px: u32, height_px: u32) {
+        let cw = self.cell.width.max(1);
+        let ch = self.cell.height.max(1);
+        let cols = ((width_px / cw).max(1)).min(u16::MAX as u32) as u16;
+        let rows = ((height_px / ch).max(1)).min(u16::MAX as u32) as u16;
+        if cols == self.cols && rows == self.rows {
+            return;
+        }
+        let old_cols = self.cols;
+        let old_rows = self.rows;
+        self.cols = cols;
+        self.rows = rows;
+        if let Err(e) = self.terminal.resize(cols, rows, cw, ch) {
+            eprintln!(
+                "[surface] terminal resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}"
+            );
+        }
+        if let Err(e) = self.pty.resize(cols, rows) {
+            eprintln!("[surface] pty resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}");
+        }
     }
 
     /// Send typed input (keyboard) to the shell.
@@ -299,19 +377,7 @@ impl Surface {
             self.atlas =
                 GlyphAtlas::from_glyph_advances(&self.font, &advance, &mut self.raster_cache);
             self.atlas_generation = self.atlas_generation.wrapping_add(1);
-            // Recompute the white-texel UV: the texel lives at pixel (0, 0);
-            // sample at the pixel center (0.5 / dims) to avoid bleeding into
-            // neighbors under bilinear filtering.
-            self.white_u = if self.atlas.width > 0 {
-                0.5 / self.atlas.width as f32
-            } else {
-                0.0
-            };
-            self.white_v = if self.atlas.height > 0 {
-                0.5 / self.atlas.height as f32
-            } else {
-                0.0
-            };
+            (self.white_u, self.white_v) = white_texel_uv(&self.atlas);
         }
         self.glyph_advance = advance;
         let t_shape = Instant::now();
@@ -548,6 +614,31 @@ impl Surface {
     }
 }
 
+/// Compute the physical pixel size to rasterize the font at, given a logical
+/// (DIP) height and the device-pixel ratio. Rounds to the nearest integer so
+/// FreeType's `set_pixel_sizes` (which takes integers) gets a stable target.
+/// `max(1)` guards the degenerate `dpr=0` / zero-height case.
+fn physical_font_size(logical_pixel_height: u32, dpr: f32) -> u32 {
+    let p = (dpr * logical_pixel_height as f32).round() as u32;
+    p.max(1)
+}
+
+/// UV at the center of the white texel (atlas pixel (0, 0)). Sampling the
+/// center avoids bleeding into neighboring glyphs under bilinear filtering.
+fn white_texel_uv(atlas: &GlyphAtlas) -> (f32, f32) {
+    let u = if atlas.width > 0 {
+        0.5 / atlas.width as f32
+    } else {
+        0.0
+    };
+    let v = if atlas.height > 0 {
+        0.5 / atlas.height as f32
+    } else {
+        0.0
+    };
+    (u, v)
+}
+
 /// Resolve the system default monospace font path via fontconfig (`fc-match`).
 fn resolve_default_font() -> Result<String, String> {
     let out = Command::new("fc-match")
@@ -568,7 +659,9 @@ fn resolve_default_font() -> Result<String, String> {
 // Pointers are borrowed from the Surface and valid only across a single tick
 // (C++ copies into QSG geometry before the next call).
 
-/// Spawn a surface. `font_path` may be null to use the system default mono font.
+/// Spawn a surface. `font_path` may be null to use the system default mono
+/// font. `pixel_height` is the logical (DIP) cell height; the font is
+/// rasterized at `dpr × pixel_height` physical pixels for hidpi sharpness.
 ///
 /// Returns an opaque heap pointer on success, or null on failure (logged).
 ///
@@ -583,6 +676,7 @@ pub unsafe extern "C" fn tako_surface_new(
     rows: u16,
     font_path: *const c_char,
     pixel_height: u32,
+    dpr: f32,
 ) -> *mut Surface {
     let font = if font_path.is_null() {
         None
@@ -593,7 +687,7 @@ pub unsafe extern "C" fn tako_surface_new(
                 .into_owned(),
         )
     };
-    match Surface::new(cols, rows, font.as_deref(), pixel_height) {
+    match Surface::new(cols, rows, font.as_deref(), pixel_height, dpr) {
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(e) => {
             eprintln!("tako_surface_new failed: {e}");
@@ -649,6 +743,44 @@ pub unsafe extern "C" fn tako_surface_write(s: *mut Surface, data: *const u8, le
     let surface = unsafe { &mut *s };
     let slice = unsafe { std::slice::from_raw_parts(data, len) };
     surface.write_input(slice);
+}
+
+/// Resize the terminal grid to fit `width_px × height_px` device-independent
+/// pixels (pre-P4; physical px post-P4). The surface computes cols/rows from
+/// its cell metrics and resizes both the terminal and the PTY. Safe to call
+/// with the current size (no-op).
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_resize_pixels(
+    s: *mut Surface,
+    width_px: u32,
+    height_px: u32,
+) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    surface.resize_to_pixels(width_px, height_px);
+}
+
+/// Reload the font at a new device-pixel ratio and invalidate size-dependent
+/// caches. The caller should follow this with [`tako_surface_resize_pixels`]
+/// using the current physical item size so the grid reflows to the new cell
+/// metrics. No-op when `dpr` is within 0.01 of the current value.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_set_dpr(s: *mut Surface, dpr: f32) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    surface.set_dpr(dpr);
 }
 
 // Keep CString reachable for the FFI doc; avoids dead-code churn if unused.

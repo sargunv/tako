@@ -34,10 +34,12 @@
 extern "C" {
 // surface.rs
 void *tako_surface_new(uint16_t cols, uint16_t rows, const char *font_path,
-                       uint32_t pixel_height);
+                       uint32_t pixel_height, float dpr);
 void tako_surface_destroy(void *surface);
 void tako_surface_tick(void *surface, TakoFramePlan *out);
 void tako_surface_write(void *surface, const uint8_t *data, size_t len);
+void tako_surface_resize_pixels(void *surface, uint32_t width_px, uint32_t height_px);
+void tako_surface_set_dpr(void *surface, float dpr);
 
 // gl_renderer.rs
 void *tako_gl_renderer_new();
@@ -91,11 +93,83 @@ TakoTerminalView::~TakoTerminalView() {
     if (m_surface) tako_surface_destroy(m_surface);
 }
 
+float TakoTerminalView::windowDpr() const {
+    if (auto *w = window()) {
+        return static_cast<float>(w->devicePixelRatio());
+    }
+    return 1.0f;
+}
+
+void TakoTerminalView::onDprChanged() {
+    if (!m_surface) return;
+    const float dpr = windowDpr();
+    tako_surface_set_dpr(m_surface, dpr);
+    // Reflow to the new cell metrics. Cell metrics are now physical, so pass
+    // the item's physical size (DIP × DPR).
+    if (width() >= 1.0 && height() >= 1.0) {
+        tako_surface_resize_pixels(m_surface,
+                                   static_cast<uint32_t>(width() * dpr),
+                                   static_cast<uint32_t>(height() * dpr));
+    }
+}
+
+void TakoTerminalView::itemChange(ItemChange change, const ItemChangeData &value) {
+    QQuickFramebufferObject::itemChange(change, value);
+    // When the item joins a window, wire the screenChanged signal so DPR
+    // transitions (window dragged between monitors) reload the font at the new
+    // physical size. We connect once and guard with m_dprSignalConnected.
+    if (change == ItemSceneChange && value.window && !m_dprSignalConnected) {
+        m_dprSignalConnected = true;
+        connect(value.window, &QQuickWindow::screenChanged, this,
+                [this](QScreen *) { onDprChanged(); });
+        connect(value.window, &QQuickWindow::activeFocusItemChanged, this,
+                [this] {
+                    // Some platforms fire DPR changes without screenChanged;
+                    // activeFocusItemChanged is a cheap moment to re-check.
+                    onDprChanged();
+                });
+        // The surface may have been created (ensureSurface) before the window
+        // was attached, with a fallback DPR of 1.0. Re-check now.
+        onDprChanged();
+    }
+}
+
 void TakoTerminalView::ensureSurface() {
     if (!m_surface) {
-        // 18 px cell height, fixed 80×24 grid for now; resize lands in P3.
-        m_surface = tako_surface_new(80, 24, nullptr, 18);
+        // Placeholder grid; resized to the item's actual geometry immediately
+        // below (or on the first geometryChange if the item isn't laid out
+        // yet). 18 px is the LOGICAL cell height; the surface multiplies it by
+        // the window's devicePixelRatio to rasterize at physical resolution.
+        const float dpr = windowDpr();
+        m_surface = tako_surface_new(80, 24, nullptr, 18, dpr);
+        // Resize to the item's actual physical size on creation so the grid
+        // matches the window from the first frame (cell metrics are physical
+        // post-P4, so pass width × dpr).
+        if (m_surface && width() >= 1.0 && height() >= 1.0) {
+            const uint32_t phys_w = static_cast<uint32_t>(width() * dpr);
+            const uint32_t phys_h = static_cast<uint32_t>(height() * dpr);
+            tako_surface_resize_pixels(m_surface, phys_w, phys_h);
+        }
     }
+}
+
+void TakoTerminalView::geometryChange(const QRectF &newGeometry,
+                                      const QRectF &oldGeometry) {
+    QQuickFramebufferObject::geometryChange(newGeometry, oldGeometry);
+    if (!m_surface) {
+        return;
+    }
+    // Skip degenerate sizes (0×0 at startup, or during teardown).
+    if (newGeometry.width() < 1.0 || newGeometry.height() < 1.0) {
+        return;
+    }
+    // `newGeometry` is in DIPs; the surface's cell metrics are physical, so
+    // pass physical px (DIP × DPR). The surface no-ops if cols/rows are
+    // unchanged, so sub-cell motion during drag doesn't trigger a resize.
+    const float dpr = windowDpr();
+    tako_surface_resize_pixels(
+        m_surface, static_cast<uint32_t>(newGeometry.width() * dpr),
+        static_cast<uint32_t>(newGeometry.height() * dpr));
 }
 
 QQuickFramebufferObject::Renderer *TakoTerminalView::createRenderer() const {

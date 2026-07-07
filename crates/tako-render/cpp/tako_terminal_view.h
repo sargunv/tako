@@ -57,12 +57,26 @@ protected:
     // TODO(phase-1-§5): drag selection, middle-click paste, SGR mouse.
     void mousePressEvent(QMouseEvent *e) override;
 
+    // Resize: recompute cols/rows from the item size ÷ cell metrics and push
+    // to the Surface (which resizes the terminal + PTY).
+    void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
+
+    // Detect when the item joins a window so we can wire DPR-change signals.
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
+
 private:
     void ensureSurface();
+    // Read the window's current device-pixel ratio. Falls back to 1.0 when the
+    // item isn't in a window yet (e.g. during construction).
+    float windowDpr() const;
+    // React to a DPR change (window moved between monitors, or the screen's
+    // DPR changed): reload the font at the new physical size and reflow.
+    void onDprChanged();
 
     void *m_surface = nullptr;  // Surface* from tako_surface_new (opaque)
     QTimer *m_timer = nullptr;
     TakoFramePlan m_plan = {};
+    bool m_dprSignalConnected = false;
 };
 
 // Render-thread renderer. A thin shell around the Rust GlRenderer: C++ only

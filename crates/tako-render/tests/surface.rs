@@ -11,7 +11,7 @@ use tako_render::surface::{FramePlan, Vertex};
 #[test]
 fn surface_ticks_and_emits_vertices() {
     // Spawn the surface at a small cell size; let the shell emit its prompt.
-    let mut surface = Surface::new(80, 24, None, 18).expect("surface_new");
+    let mut surface = Surface::new(80, 24, None, 18, 1.0).expect("surface_new");
 
     // Give the shell a moment to emit its prompt, then tick a few times.
     for i in 0..10 {

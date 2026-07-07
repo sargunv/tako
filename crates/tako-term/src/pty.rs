@@ -219,6 +219,20 @@ impl StreamingPty {
         self.writer.flush()?;
         Ok(())
     }
+
+    /// Resize the PTY window to the given grid size. Idempotent; safe to call
+    /// with the current dimensions. The child sees a `SIGWINCH` and
+    /// re-queries the window size via `ioctl(TIOCGWINSZ)`.
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self._master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| io::Error::other(format!("pty resize failed: {e}")))
+    }
 }
 
 impl Drop for StreamingPty {
