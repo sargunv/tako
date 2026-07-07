@@ -81,13 +81,26 @@ impl GlyphAtlas {
         Self::pack(face, bitmaps, advance)
     }
 
-    /// Build an atlas from a pre-shaped glyph-id → advance map. Lets the caller
-    /// cache shaping across frames (rustybuzz re-parses the font per `shape`).
-    pub fn from_glyph_advances(face: &FontFace, advance: &HashMap<u32, f32>) -> Self {
+    /// Build an atlas from a pre-shaped glyph-id → advance map, using a
+    /// caller-owned rasterization cache so each glyph id is rasterized at most
+    /// once across rebuilds. Lets the caller cache shaping across frames
+    /// (rustybuzz re-parses the font per `shape` — also now cached in
+    /// [`FontFace`]).
+    pub fn from_glyph_advances(
+        face: &FontFace,
+        advance: &HashMap<u32, f32>,
+        raster_cache: &mut HashMap<u32, GlyphBitmap>,
+    ) -> Self {
         let mut bitmaps: HashMap<u32, GlyphBitmap> = HashMap::new();
         for &gid in advance.keys() {
-            if let Ok(bm) = face.rasterize(gid) {
-                bitmaps.insert(gid, bm);
+            // Rasterize-and-cache: subsequent atlas rebuilds (which re-pack the
+            // whole map when new glyphs arrive) reuse the cached bitmap rather
+            // than re-calling FreeType for every glyph each time.
+            let bm = raster_cache
+                .entry(gid)
+                .or_insert_with(|| face.rasterize(gid).unwrap_or_default());
+            if bm.width > 0 && bm.height > 0 {
+                bitmaps.insert(gid, bm.clone());
             }
         }
         Self::pack(face, bitmaps, advance.clone())

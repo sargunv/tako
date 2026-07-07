@@ -7,6 +7,8 @@
 
 #include <QColor>
 #include <QImage>
+#include <QKeyEvent>
+#include <QMouseEvent>
 #include <QQmlEngine>
 #include <QQuickWindow>
 #include <QSGFlatColorMaterial>
@@ -17,6 +19,9 @@
 #include <QSGTransformNode>
 #include <QTimer>
 #include <QtQuick/qsgnode.h>
+
+#include <chrono>
+#include <cstdio>
 
 // ---- C ABI into the Rust `tako_render::surface` module ----
 
@@ -40,12 +45,14 @@ struct TakoFramePlan {
     size_t quad_count;
     uint32_t atlas_w, atlas_h;
     const uint8_t *atlas_pixels;
+    uint64_t atlas_generation;
 };
 
 void *tako_surface_new(uint16_t cols, uint16_t rows, const char *font_path,
                        uint32_t pixel_height);
 void tako_surface_destroy(void *surface);
 void tako_surface_tick(void *surface, TakoFramePlan *out);
+void tako_surface_write(void *surface, const uint8_t *data, size_t len);
 }
 
 // Register the TakoTerminalView QQuickItem as `TerminalView` under a dedicated
@@ -77,6 +84,9 @@ QSGGeometry *makePointGeometry() {
 
 TakoTerminalView::TakoTerminalView(QQuickItem *parent) : QQuickItem(parent) {
     setFlag(QQuickItem::ItemHasContents);
+    // Accept left-button clicks so the item can claim active keyboard focus on
+    // click; middle button is reserved for selection paste (TODO phase-1-§5).
+    setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
     m_timer = new QTimer(this);
     m_timer->setInterval(16);  // ~60 Hz poll for PTY output
     connect(m_timer, &QTimer::timeout, this, [this] { update(); });
@@ -106,11 +116,14 @@ void TakoTerminalView::ensureSurface() {
 
 QSGNode *TakoTerminalView::updatePaintNode(QSGNode *oldNode,
                                            UpdatePaintNodeData *) {
+    const auto t0 = std::chrono::steady_clock::now();
     ensureSurface();
     if (!m_surface) return oldNode;
 
     TakoFramePlan plan;
+    const auto t_tick_start = std::chrono::steady_clock::now();
     tako_surface_tick(m_surface, &plan);
+    const auto t_tick_end = std::chrono::steady_clock::now();
 
     auto *root = static_cast<QSGTransformNode *>(oldNode);
     if (!root) {
@@ -159,11 +172,19 @@ QSGNode *TakoTerminalView::updatePaintNode(QSGNode *oldNode,
         bgNode->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
     }
 
-    // --- atlas texture (rebuild only when it grows) ---
+    // --- atlas texture (rebuild on content change OR dimension change) ---
+    // The atlas pixels, glyph placements, and UVs are all recomputed in Rust
+    // whenever a new glyph id appears. Dimensions may stay the same (shelf-pack
+    // repacks into the existing canvas), so we additionally track a generation
+    // counter bumped on every rebuild; without this, stale glyph placements
+    // corrupt the render once the canvas stabilizes in size.
+    const bool dims_changed =
+        !m_atlasInit || (int)plan.atlas_w != m_atlasW || (int)plan.atlas_h != m_atlasH;
+    bool atlas_texture_rebuilt = false;
     if (plan.atlas_w && plan.atlas_h &&
-        (int)plan.atlas_w * (int)plan.atlas_h > 0 &&
-        (!m_atlasTexture || (int)plan.atlas_w != m_atlasW ||
-         (int)plan.atlas_h != m_atlasH)) {
+        (plan.atlas_generation != m_atlasGen || dims_changed)) {
+        atlas_texture_rebuilt = true;
+        const auto t_atlas_start = std::chrono::steady_clock::now();
         delete m_atlasTexture;
         m_atlasTexture = nullptr;
 
@@ -187,6 +208,17 @@ QSGNode *TakoTerminalView::updatePaintNode(QSGNode *oldNode,
         m_atlasTexture = window()->createTextureFromImage(img);
         m_atlasW = (int)plan.atlas_w;
         m_atlasH = (int)plan.atlas_h;
+        m_atlasGen = plan.atlas_generation;
+        m_atlasInit = true;
+        const auto t_atlas_end = std::chrono::steady_clock::now();
+        const auto atlas_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(t_atlas_end - t_atlas_start)
+                .count();
+        if (atlas_us > 2000) {
+            fprintf(stderr,
+                    "[updatePaintNode] atlas texture rebuild=%lldµs (%ux%u)\n",
+                    (long long)atlas_us, plan.atlas_w, plan.atlas_h);
+        }
     }
 
     // --- glyphs ---
@@ -235,5 +267,173 @@ QSGNode *TakoTerminalView::updatePaintNode(QSGNode *oldNode,
         cursorNode->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
     }
 
+    const auto t_end = std::chrono::steady_clock::now();
+    const auto total_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t0).count();
+    const auto tick_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_tick_end - t_tick_start).count();
+    const auto qsg_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_tick_end).count();
+    // Log slow frames: >5ms total OR atlas rebuild OR lots of quads. The
+    // tick-vs-qsg split tells us whether the cost is in the Rust core or in
+    // QSG node building / texture upload.
+    if (total_us > 5000 || atlas_texture_rebuilt || plan.quad_count > 1500) {
+        fprintf(stderr,
+                "[updatePaintNode] total=%lldµs tick=%lldµs qsg=%lldµs "
+                "atlas_rebuilt=%d quads=%zu atlas=%ux%u\n",
+                (long long)total_us, (long long)tick_us, (long long)qsg_us,
+                (int)atlas_texture_rebuilt, (size_t)plan.quad_count, plan.atlas_w,
+                plan.atlas_h);
+    }
+
     return root;
+}
+
+// ---- keyboard input ----
+//
+// Translate a QKeyEvent into the byte sequence a terminal application expects
+// (ANSI/VT escape sequences for special keys, raw bytes for printable chars,
+// and control codes for Ctrl+letter combos), then write them to the PTY via
+// tako_surface_write. Modified keys (Shift+arrow etc.) currently send the
+// unmodified sequence; full modifier-aware CSI (~ and 1;A-style) sequences are
+// TODO(phase-1-§5) once we wire app-cursor / modifier reporting.
+
+void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
+    if (!m_surface) {
+        QQuickItem::keyPressEvent(e);
+        return;
+    }
+
+    const int key = e->key();
+    const Qt::KeyboardModifiers mods = e->modifiers();
+    const QString text = e->text();
+    QByteArray bytes;
+
+    const bool ctrl = mods & Qt::ControlModifier;
+
+    // Ctrl+A..Z → 0x01..0x1A (terminal control characters, e.g. Ctrl+C = ETX).
+    if (ctrl && key >= Qt::Key_A && key <= Qt::Key_Z) {
+        bytes.append(static_cast<char>(key - Qt::Key_A + 1));
+    }
+    // Ctrl+[ ] \ → ESC (0x1b), FS (0x1c), GS (0x1d). Ctrl+Space/@ → NUL.
+    else if (ctrl && key == Qt::Key_BracketLeft) {
+        bytes.append('\x1b');
+    } else if (ctrl && key == Qt::Key_Backslash) {
+        bytes.append('\x1c');
+    } else if (ctrl && key == Qt::Key_BracketRight) {
+        bytes.append('\x1d');
+    } else if (ctrl && (key == Qt::Key_At || key == Qt::Key_Space)) {
+        bytes.append('\x00');
+    } else {
+        switch (key) {
+            case Qt::Key_Return:
+            case Qt::Key_Enter:
+                bytes.append('\r');
+                break;
+            case Qt::Key_Backspace:
+                // DEL (0x7f) is the conventional terminal backspace; ghostty
+                // and most shells treat ^? as erase-char by default.
+                bytes.append('\x7f');
+                break;
+            case Qt::Key_Tab:
+                bytes.append('\t');
+                break;
+            case Qt::Key_Escape:
+                bytes.append('\x1b');
+                break;
+            case Qt::Key_Up:
+                bytes.append("\x1b[A");
+                break;
+            case Qt::Key_Down:
+                bytes.append("\x1b[B");
+                break;
+            case Qt::Key_Right:
+                bytes.append("\x1b[C");
+                break;
+            case Qt::Key_Left:
+                bytes.append("\x1b[D");
+                break;
+            case Qt::Key_Home:
+                bytes.append("\x1b[H");
+                break;
+            case Qt::Key_End:
+                bytes.append("\x1b[F");
+                break;
+            case Qt::Key_PageUp:
+                bytes.append("\x1b[5~");
+                break;
+            case Qt::Key_PageDown:
+                bytes.append("\x1b[6~");
+                break;
+            case Qt::Key_Insert:
+                bytes.append("\x1b[2~");
+                break;
+            case Qt::Key_Delete:
+                bytes.append("\x1b[3~");
+                break;
+            case Qt::Key_F1:
+                bytes.append("\x1bOP");
+                break;
+            case Qt::Key_F2:
+                bytes.append("\x1bOQ");
+                break;
+            case Qt::Key_F3:
+                bytes.append("\x1bOR");
+                break;
+            case Qt::Key_F4:
+                bytes.append("\x1bOS");
+                break;
+            case Qt::Key_F5:
+                bytes.append("\x1b[15~");
+                break;
+            case Qt::Key_F6:
+                bytes.append("\x1b[17~");
+                break;
+            case Qt::Key_F7:
+                bytes.append("\x1b[18~");
+                break;
+            case Qt::Key_F8:
+                bytes.append("\x1b[19~");
+                break;
+            case Qt::Key_F9:
+                bytes.append("\x1b[20~");
+                break;
+            case Qt::Key_F10:
+                bytes.append("\x1b[21~");
+                break;
+            case Qt::Key_F11:
+                bytes.append("\x1b[23~");
+                break;
+            case Qt::Key_F12:
+                bytes.append("\x1b[24~");
+                break;
+            default:
+                // Printable: forward UTF-8. Text may be empty for unmapped
+                // hardware keys; ignore those rather than spamming the shell.
+                if (!text.isEmpty()) {
+                    bytes.append(text.toUtf8());
+                } else {
+                    QQuickItem::keyPressEvent(e);
+                    return;
+                }
+        }
+    }
+
+    if (!bytes.isEmpty()) {
+        tako_surface_write(m_surface,
+                           reinterpret_cast<const uint8_t *>(bytes.constData()),
+                           static_cast<size_t>(bytes.size()));
+    }
+    e->accept();
+}
+
+// ---- mouse ----
+//
+// For now a click only claims active focus so that subsequent key events are
+// delivered to this item. Drag selection, middle-click paste, and SGR mouse
+// reporting land in phase-1-§5.
+
+void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
+    forceActiveFocus();
+    e->accept();
 }

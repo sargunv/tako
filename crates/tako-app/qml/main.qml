@@ -11,17 +11,19 @@ ApplicationWindow {
     width: 900
     height: 480
     visible: true
-    title: qsTr("Tako — Phase 0 §3 terminal spike")
+    title: qsTr("Tako — Phase 1 §1 keyboard input")
     color: palette.window
 
-    // The live libghostty-vt terminal. Spawns $SHELL on a PTY and renders via
-    // QSG. Input/resize arrive in Step D; for now this proves the render path.
+    // The live libghostty-vt terminal. Click to focus, then type.
     TerminalView {
+        id: term
         anchors.fill: parent
+        focus: true
+        Component.onCompleted: term.forceActiveFocus()
     }
 
     Label {
-        text: qsTr("Phase 0 §3: monochrome QSG render of libghostty-vt — input in Step D")
+        text: qsTr("Phase 1 §1: keyboard input — click then type. Color/resize/hidpi next.")
         color: palette.text
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter

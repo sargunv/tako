@@ -47,7 +47,7 @@ pub struct ShapedGlyph {
 }
 
 /// A rasterized 8-bit grayscale glyph bitmap, plus its bearing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GlyphBitmap {
     pub width: u32,
     pub height: u32,
@@ -74,7 +74,14 @@ pub struct FontFace {
     /// Held only so its Drop (`FT_Done_FreeType`) runs after `face`'s Drop.
     /// Declared after `face` so the field drop order frees the face first.
     _library: Library,
-    font_bytes: Rc<Vec<u8>>,
+    /// Parsed font tables for rustybuzz shaping, built once at construction.
+    /// Backed by a leaked copy of the font bytes (see [`Self::from_path`]); the
+    /// leak is ~font_bytes.len() bytes per FontFace, acceptable for one font
+    /// per surface. Without this cache, `shape()` re-parsed the TTF on every
+    /// call and bursts of new graphemes (e.g. `ls -la /usr/bin`) froze the app
+    /// for seconds. Revisit with `ouroboros`/`elsa` if reloads ever leak too
+    /// much (e.g. frequent DPR changes).
+    rb_face: rustybuzz::Face<'static>,
     pixel_height: u32,
     /// Font units-per-em, cached for scaling rustybuzz design-unit advances.
     units_per_em: u32,
@@ -87,14 +94,24 @@ impl FontFace {
             .map_err(|e| FontError(format!("read font failed: {e}")))?;
         let font_bytes = Rc::new(bytes);
         let library = Library::init()?;
-        // Own the bytes inside the face via a shared Rc clone.
+        // Own the bytes inside the face via a shared Rc clone. freetype-rs
+        // retains its own Rc clone, so we don't keep a separate field.
         let face = library.new_memory_face(Rc::clone(&font_bytes), 0)?;
         face.set_pixel_sizes(pixel_height, pixel_height)?;
         let units_per_em = face.raw().units_per_EM.max(1) as u32;
+
+        // Leaked copy for rustybuzz: `Face::from_slice` borrows its input for
+        // the face's whole lifetime, and `Face` isn't 'static unless the bytes
+        // are. `Box::leak` gives us a stable `&'static [u8]` so we can stash
+        // the parsed tables in `rb_face` and skip re-parsing on every shape().
+        let rb_bytes: &'static [u8] = Box::leak((*font_bytes).clone().into_boxed_slice());
+        let rb_face = rustybuzz::Face::from_slice(rb_bytes, 0)
+            .ok_or_else(|| FontError("rustybuzz parse failed".to_string()))?;
+
         Ok(Self {
             face,
             _library: library,
-            font_bytes,
+            rb_face,
             pixel_height,
             units_per_em,
         })
@@ -146,14 +163,13 @@ impl FontFace {
         (self.face.glyph().advance().x >> 6) as i32
     }
 
-    /// Shape UTF-8 `text` into positioned glyphs. Re-parses the font tables for
-    /// each call; batch all graphemes for a frame together to amortize.
+    /// Shape UTF-8 `text` into positioned glyphs. The font tables are parsed
+    /// once at construction (see [`Self::rb_face`]); this only allocates the
+    /// shaping buffer per call.
     pub fn shape(&self, text: &str) -> Vec<ShapedGlyph> {
-        let rb =
-            rustybuzz::Face::from_slice(&self.font_bytes, 0).expect("font bytes re-parse failed");
         let mut buf = rustybuzz::UnicodeBuffer::new();
         buf.push_str(text);
-        let glyphs = rustybuzz::shape(&rb, &[], buf);
+        let glyphs = rustybuzz::shape(&self.rb_face, &[], buf);
 
         // rustybuzz returns advances/offsets in font design units; scale to
         // pixels via the requested pixel height over units-per-em.

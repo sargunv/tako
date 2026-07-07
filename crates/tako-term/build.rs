@@ -18,8 +18,17 @@ const GHOSTTY_COMMIT: &str = "b213a72c03b427607b43c89ff4223a7baa079fe8";
 const GHOSTTY_TARBALL_SHA256: &str =
     "56654a033fdbed828fd6ac1d275baef920cf1b856ded088c2102e41831a16a0f";
 
+// ghostty-vt runs extensive safety/validation passes in Debug/ReleaseSafe that
+// make VT parsing ~100x slower (per the ghostling README: "Debug builds are
+// VERY SLOW"). A 103 KB `ls /usr/bin` took 9.5s in Debug vs instant in a real
+// terminal. ReleaseFast compiles those out and optimizes — the only sane mode
+// for a terminal core, even in dev builds of the surrounding Rust.
+const GHOSTTY_OPTIMIZE: &str = "ReleaseFast";
+
 fn main() {
-    let cache = cache_dir().join(GHOSTTY_COMMIT);
+    // Cache key includes the optimize mode so switching it triggers a rebuild
+    // rather than reusing a stale Debug-built .a under the same commit.
+    let cache = cache_dir().join(format!("{GHOSTTY_COMMIT}-{GHOSTTY_OPTIMIZE}"));
     let src = cache.join("src");
     let lib = src.join("zig-out").join("lib").join("libghostty-vt.a");
     let include = src.join("include");
@@ -128,7 +137,9 @@ fn extract_tarball(tarball: &PathBuf, dest: &PathBuf) {
 
 fn build_libghostty_vt(src: &PathBuf) {
     let status = Command::new("zig")
-        .args(["build", "-Demit-lib-vt"])
+        .arg("build")
+        .arg("-Demit-lib-vt")
+        .arg(format!("-Doptimize={GHOSTTY_OPTIMIZE}"))
         .current_dir(src)
         .status()
         .unwrap_or_else(|e| {
@@ -136,7 +147,7 @@ fn build_libghostty_vt(src: &PathBuf) {
         });
     assert!(
         status.success(),
-        "`zig build -Demit-lib-vt` failed in {}",
+        "`zig build -Demit-lib-vt -Doptimize={GHOSTTY_OPTIMIZE}` failed in {}",
         src.display()
     );
 }

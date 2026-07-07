@@ -570,7 +570,7 @@ something dogfoodable.
 
 - [x] cxx-qt hello world: one QML window calling into Rust.
 - [x] `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
-- [ ] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
+- [x] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
       a `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per
       font.
 - [ ] Measure type-to-pixel latency. Target < 16 ms, no dropped frames under
