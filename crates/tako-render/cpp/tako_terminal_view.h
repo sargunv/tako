@@ -17,6 +17,8 @@
 
 class QKeyEvent;
 class QMouseEvent;
+class QWheelEvent;
+class QFocusEvent;
 class QTimer;
 
 // C-layout mirror of `tako_render::surface::FramePlan`. Field-for-field
@@ -49,12 +51,19 @@ public:
     const TakoFramePlan &plan() const { return m_plan; }
 
 protected:
-    // Keyboard input: translate QKeyEvent to terminal bytes and feed the PTY.
+    // Keyboard: translate QKeyEvent to GhosttyKey + mods and forward via the
+    // libghostty-vt key encoder (which honors DEC modes / Kitty protocol).
     void keyPressEvent(QKeyEvent *e) override;
+    void keyReleaseEvent(QKeyEvent *e) override;
 
-    // Mouse: click claims active focus so key events arrive here.
-    // TODO(phase-1-§5): drag selection, middle-click paste, SGR mouse.
+    // Mouse: route to the encoder when mouse tracking is on; otherwise reserve
+    // for selection / wheel-scroll (TODO: drag selection).
     void mousePressEvent(QMouseEvent *e) override;
+    void mouseReleaseEvent(QMouseEvent *e) override;
+    void mouseMoveEvent(QMouseEvent *e) override;
+    void wheelEvent(QWheelEvent *e) override;
+    void focusInEvent(QFocusEvent *e) override;
+    void focusOutEvent(QFocusEvent *e) override;
 
     // Resize: recompute cols/rows from the item size ÷ cell metrics and push
     // to the Surface (which resizes the terminal + PTY).
@@ -71,11 +80,15 @@ private:
     // React to a DPR change (window moved between monitors, or the screen's
     // DPR changed): reload the font at the new physical size and reflow.
     void onDprChanged();
+    // Pull a fresh title (if any) from the surface and emit windowTitleChanged.
+    void flushHostTitle();
 
     void *m_surface = nullptr;  // Surface* from tako_surface_new (opaque)
     QTimer *m_timer = nullptr;
     TakoFramePlan m_plan = {};
     bool m_dprSignalConnected = false;
+    // Tracks whether any mouse button is held, for any-event motion reporting.
+    bool m_anyMouseButtonHeld = false;
 };
 
 // Render-thread renderer. A thin shell around the Rust GlRenderer: C++ only

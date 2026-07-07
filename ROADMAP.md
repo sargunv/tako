@@ -216,27 +216,39 @@ GraphicsApp; on X11 usually GL. Either way Tako's code is the same.
 
 ### 4.2 Input
 
-- **Keyboard**: xkbcommon (Qt already links it) → `ghostty_input_key_s`
-  equivalent. Keysym → ghostty key mapping table built once. Modifiers use
-  native scan codes to disambiguate left/right Ctrl/Alt/Shift/Super.
-- **Mouse**: Qt mouse events → libghostty-vt mouse encoder. Fractional
-  coordinates in points (libghostty multiplies by content scale internally).
-- **Selection / clipboard**: PRIMARY (X11 middle-click) + CLIPBOARD.
-  libghostty-vt's paste-safety utilities gate large/unsafe pastes.
-- **IME**: `QInputMethodEvent` → libghostty-vt preedit/commit calls. Cursor rect
-  from the render state positions the candidate window.
+- **Keyboard**: Qt `QKeyEvent` → GhosttyKey (W3C UI Events physical codes) →
+  libghostty-vt key encoder. The encoder owns mode-aware logic (DEC 1 cursor
+  keys, DEC 66 keypad, DEC 1036 alt-esc, xterm modifyOtherKeys, Kitty keyboard
+  protocol); Tako never hand-rolls CSI sequences. See `tako-term::key`.
+- **Mouse**: Qt mouse events → libghostty-vt mouse encoder. Coordinates in
+  surface pixels; cell mapping handled by the encoder via the size context
+  (`MouseEncoder::set_size`). Tracking mode + format sync from terminal state
+  per event. See `tako-term::mouse`.
+- **Focus**: libghostty-vt focus encoder emits `CSI I` / `CSI O` only when DEC
+  mode 1004 is set; Tako checks the mode before encoding.
+- **Paste**: `ghostty_paste_encode` strips unsafe controls and wraps in
+  bracketed paste markers when DEC mode 2004 is set.
+- **Selection / clipboard** _(planned)_: PRIMARY (X11 middle-click) + CLIPBOARD.
+  `GhosttySelection` + grid-ref helpers in libghostty-vt;
+  drag/word/line/rectangle logic host-implemented. OSC 52 with read/write
+  confirm prompts.
+- **IME** _(planned)_: `QInputMethodEvent` → render preedit inline. No
+  libghostty-vt API; the host owns the preedit string and its rendering.
 
 ### 4.3 OSC dispatch
 
-libghostty-vt's `vt/osc.h` parser emits typed commands. Tako routes them:
+libghostty-vt's `vt/osc.h` parser emits typed commands. Tako routes them (most
+arrive via the `write_pty` effect or the title/pwd change effects registered in
+`tako-term::effects`):
 
-| OSC          | Command type                                 | Tako consumer                               |
-| ------------ | -------------------------------------------- | ------------------------------------------- |
-| 0 / 1 / 2    | change window title                          | surface title → tab bar + sidebar           |
-| 7            | current working directory (file://host/path) | `Panel.cwd` → git probe, sidebar            |
-| 9 / 99 / 777 | notification (iTerm / urxvt variants)        | `tako-notify` ingest                        |
-| 133          | FinalTerm prompt marks                       | shell activity (Idle/Prompt/CommandRunning) |
-| 8            | hyperlinks                                   | rendered inline (handled by glyph pass)     |
+| OSC          | Command type                                 | Tako consumer                               | Status                                                      |
+| ------------ | -------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
+| 0 / 1 / 2    | change window title                          | surface title → tab bar + sidebar           | ✓ (`title_changed` effect → Qt window title)                |
+| 7            | current working directory (file://host/path) | `Panel.cwd` → git probe, sidebar            | ✓ captured (`pwd_changed` effect); Phase 4 wires to sidebar |
+| 9 / 99 / 777 | notification (iTerm / urxvt variants)        | `tako-notify` ingest                        | deferred (Phase 3)                                          |
+| 133          | FinalTerm prompt marks                       | shell activity (Idle/Prompt/CommandRunning) | deferred (Phase 3)                                          |
+| 8            | hyperlinks                                   | per-cell URL storage + cmd-click            | deferred (see Phase 1 gaps)                                 |
+| 52           | clipboard set/query                          | `QClipboard` with read/write confirm        | deferred (see Phase 1 gaps)                                 |
 
 Plus the explicit shell-integration path (installed by `tako`): zsh/bash/fish
 hooks call into the control API for `report_pwd`, `report_tty`, `ports_kick`
@@ -573,23 +585,65 @@ something dogfoodable.
 - [x] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
       a `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per
       font.
-- [ ] Measure type-to-pixel latency. Target < 16 ms, no dropped frames under
+- [x] Measure type-to-pixel latency. Target < 16 ms, no dropped frames under
       `yes` / `cat big.log`.
-- [ ] Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject` →
-      `rustybuzz`+`ab_glyph` if freetype/harfbuzz binding is painful →
-      `alacritty_terminal` as a last-resort terminal core if libghostty-vt ABI
-      churn is unmanageable.
-- [ ] **Gate:** latency acceptable → continue. Not → re-scope before further
+- [x] Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject` →
+      `rustybuzz`+`ab_glyph` if freetype/harfbuzz binding is painful
+- [x] **Gate:** latency acceptable → continue. Not → re-scope before further
       investment.
 
 ### Phase 1 — Working native terminal _(~3–5 weeks)_
 
-- One window, one workspace, one terminal surface. Spawn shell, read config.
-- Input: keyboard (xkbcommon keysym mapping table), mouse, selection, clipboard
-  (PRIMARY + CLIPBOARD), IME, resize, DPI/scale.
-- OSC 7 (cwd), OSC 0/2 (title) wired.
-- Shell-integration script (zsh/bash/fish) installed by Tako.
-- **Deliverable:** a usable native terminal. Dogfood daily.
+**Status:** mostly done. Core terminal usable; the gaps below are tracked
+separately and deferred until after the Phase 1 deliverable is dogfooded.
+
+Subtasks (✓ = landed in this repo):
+
+- [x] One window, one workspace, one terminal surface. Spawn shell.
+- [x] **Render:** FBO+glow pivot, per-cell color (fg/bg/inverse/faint), resize,
+      HiDPI (`set_dpr`), four cursor styles (Block/Bar/Underline/ BlockHollow).
+      Atlas/font rasterization caches. UV sentinel for flat quads.
+- [x] **Effects layer** (`tako-term::effects`): `write_pty`, `bell`,
+      `title_changed`, `pwd_changed`, `xtversion`, `enquiry`,
+      `device_attributes` (DA1/DA2/DA3), `size` (XTWINOPS), `color_scheme` (CSI
+      ? 996 n). Identity = "tako 0.1.0", DA1 = VT220 conformance + ANSI color
+      (intentionally better than ghostling, which registers no effects and
+      silently drops DA queries).
+- [x] **Keyboard input** via libghostty-vt key encoder (DEC modes 1, 66, 1036,
+      modifyOtherKeys, Kitty protocol — all handled inside the encoder). C++
+      translates Qt::Key → GhosttyKey (W3C UI Events codes).
+- [x] **Mouse input** via libghostty-vt mouse encoder (X10/Normal/Button/ Any
+      tracking; X10/UTF-8/SGR/URxvt/SGR-Pixels formats). Wheel encoded as button
+      4/5 when tracked.
+- [x] **Focus reporting** (DEC mode 1004).
+- [x] **Paste safety + bracketed paste** (DEC mode 2004) via
+      `ghostty_paste_encode`.
+- [x] **Scrollback navigation:** wheel scroll (local viewport) when mouse
+      tracking is off; keyboard PageUp/Down via the encoder's ALT_SCROLL
+      handling (mode 1007) when in alt-screen.
+- [x] **OSC 0/2 (title)** wired: window title updates from shell.
+- [x] **OSC 7 (cwd)** captured into Surface state (consumer TBD — Phase 4
+      workspace metadata).
+- [ ] **Selection engine:** drag-select, word/line select (double/triple click),
+      rectangle mode, copy-on-select, scrollback auto-scroll on drag to edge.
+      Host-implemented (libghostty-vt only provides `GhosttySelection` +
+      grid-ref helpers).
+- [ ] **Clipboard:** copy/paste shortcuts (Ctrl+Shift+C/V), middle-click paste
+      (PRIMARY), OSC 52 dispatch with read/write confirm prompts.
+- [ ] **IME composition:** render preedit string (no libghostty-vt API; host
+      responsibility). MVP: render unformatted preedit text.
+- [ ] **Cursor blink:** 530 ms on/off phase (xterm default); suppressed on
+      `password_input` to defeat keyloggers; suppressed when unfocused.
+- [ ] **Hyperlinks (OSC 8):** per-cell URL storage + cmd-click open.
+- [ ] **Synchronized Output (DEC 2026):** defer framebuffer flush while mode is
+      set (prevents tearing on bulk output like `tmux attach`).
+- [ ] **Shell-integration script** (zsh/bash/fish) installed by Tako.
+- [ ] **Config (`tako-config`):** font family/size, palette, fg/bg/cursor,
+      scrollback limit, cursor style default. Currently the crate is a stub; the
+      surface hard-codes `fc-match monospace` and ghostty defaults.
+- [x] **Deliverable (partial):** a usable native terminal. Dogfood daily.
+      Selection + clipboard + IME are the major remaining usability gaps before
+      this is fully ticked.
 
 ### Phase 2 — Sidebar, tabs, splits, workspaces _(~3–4 weeks)_
 

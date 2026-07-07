@@ -43,11 +43,33 @@ fn main() {
     }
 
     let header = include.join("ghostty").join("vt.h");
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header(header.to_string_lossy().into_owned())
         .clang_arg(format!("-I{}", include.display()))
         .derive_default(true)
-        .generate_comments(false)
+        .generate_comments(false);
+
+    // libclang (clang-libs without clang-devel) does not always advertise its
+    // builtin resource directory, so bindgen fails with `limits.h not found`
+    // when sysroot probing. Probe the canonical Fedora paths and add the
+    // first one that exists. Skip if already detected via the default path.
+    // libclang (clang-libs without clang-devel) does not always advertise its
+    // builtin resource directory, so bindgen fails with `limits.h not found`
+    // when sysroot probing. Tell clang the resource dir directly.
+    if let Some(clang_inc) = find_clang_resource_include() {
+        eprintln!(
+            "[tako-term/build] using clang resource include: {}",
+            clang_inc.display()
+        );
+        // resource_dir is the parent of `include/` (e.g. /usr/lib/clang/22).
+        if let Some(resource_dir) = clang_inc.parent() {
+            builder = builder.clang_arg(format!("-resource-dir={}", resource_dir.display()));
+        }
+    } else {
+        eprintln!("[tako-term/build] no clang resource include found");
+    }
+
+    let bindings = builder
         .generate()
         .expect("bindgen failed to generate libghostty-vt bindings");
 
@@ -76,6 +98,35 @@ fn cache_dir() -> PathBuf {
     PathBuf::from(base).join("tako").join("ghostty-vt")
 }
 
+/// Locate the clang resource include directory (where `limits.h`,
+/// `stddef.h`, etc. live) on hosts that have clang-libs but not clang-devel.
+/// Tries the conventional Fedora paths first; returns `None` if none exist
+/// (assume libclang will find them itself).
+fn find_clang_resource_include() -> Option<PathBuf> {
+    // /usr/lib/clang/<major>/include — see if any version dir matches.
+    let base = PathBuf::from("/usr/lib/clang");
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        // Pick the highest-numbered version that has an include/ subdir.
+        let mut best: Option<(u32, PathBuf)> = None;
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(major) = name.parse::<u32>()
+            {
+                let inc = entry.path().join("include");
+                if inc.is_dir() {
+                    match best {
+                        Some((m, _)) if m >= major => {}
+                        _ => best = Some((major, inc)),
+                    }
+                }
+            }
+        }
+        if let Some((_, p)) = best {
+            return Some(p);
+        }
+    }
+    None
+}
 fn download_tarball(dest: &PathBuf) {
     if dest.exists() {
         return;

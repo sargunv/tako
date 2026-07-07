@@ -24,10 +24,17 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QTimer>
+#include <QWheelEvent>
 #include <QtQuick/qquickwindow.h>
 
 #include <chrono>
 #include <cstdio>
+
+// libghostty-vt enum values used by the input C ABI. The headers are
+// header-only (typedefs + enum constants), so we can include them here
+// without linking against the library.
+#include <ghostty/vt/key/event.h>
+#include <ghostty/vt/mouse/event.h>
 
 // ---- C ABI into the Rust `tako_render` crate ----
 
@@ -40,6 +47,19 @@ void tako_surface_tick(void *surface, TakoFramePlan *out);
 void tako_surface_write(void *surface, const uint8_t *data, size_t len);
 void tako_surface_resize_pixels(void *surface, uint32_t width_px, uint32_t height_px);
 void tako_surface_set_dpr(void *surface, float dpr);
+
+// input.rs (Surface::key_event / mouse_event / focus / paste / scroll)
+void tako_surface_key_event(void *surface, uint32_t action, uint32_t key,
+                            uint16_t mods, uint16_t consumed_mods,
+                            const uint8_t *text, size_t text_len);
+void tako_surface_mouse_event(void *surface, uint32_t action, uint32_t button,
+                              float x_px, float y_px, uint16_t mods);
+void tako_surface_mouse_set_any_button(void *surface, bool pressed);
+void tako_surface_focus_event(void *surface, bool gained);
+void tako_surface_paste(void *surface, const uint8_t *data, size_t len);
+void tako_surface_scroll(void *surface, int64_t delta_rows);
+int32_t tako_surface_mouse_tracking(void *surface);
+size_t tako_surface_take_title(void *surface, uint8_t *out_buf, size_t cap);
 
 // gl_renderer.rs
 void *tako_gl_renderer_new();
@@ -75,14 +95,17 @@ const void *qt_gl_loader(const char *name, void *userdata) {
 
 TakoTerminalView::TakoTerminalView(QQuickItem *parent)
     : QQuickFramebufferObject(parent) {
-    // Click-to-focus so subsequent key events arrive here. Middle button is
-    // reserved for selection paste (TODO phase-1-§5).
-    setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
+    // Click-to-focus; all buttons claimed so we can do middle-click paste,
+    // right-click selection extend, etc.
+    setAcceptedMouseButtons(Qt::AllButtons);
+    setAcceptHoverEvents(true);
+    setFlag(ItemAcceptsInputMethod, true);  // IME preedit (TODO: render)
     m_timer = new QTimer(this);
     m_timer->setInterval(16);  // ~60 Hz poll for PTY output
     connect(m_timer, &QTimer::timeout, this, [this] {
         if (m_surface) {
             tako_surface_tick(m_surface, &m_plan);
+            flushHostTitle();
         }
         update();  // schedule a render (synchronize + render on the SG thread)
     });
@@ -177,18 +200,290 @@ QQuickFramebufferObject::Renderer *TakoTerminalView::createRenderer() const {
     return new TakoTerminalRenderer();
 }
 
+// ---- helpers ----
+
+namespace {
+
+// Translate Qt modifier flags to GhosttyMods bitmask (key/event.h).
+uint16_t qt_mods_to_ghostty(Qt::KeyboardModifiers q) {
+    uint16_t m = 0;
+    if (q & Qt::ShiftModifier)    m |= GHOSTTY_MODS_SHIFT;
+    if (q & Qt::ControlModifier)  m |= GHOSTTY_MODS_CTRL;
+    if (q & Qt::AltModifier)      m |= GHOSTTY_MODS_ALT;
+    if (q & Qt::MetaModifier)     m |= GHOSTTY_MODS_SUPER;
+    if (q & Qt::KeypadModifier)   m |= GHOSTTY_MODS_NUM_LOCK;  // approx
+    if (q & Qt::GroupSwitchModifier) m |= GHOSTTY_MODS_ALT;    // approx (X11)
+    return m;
+}
+
+// Translate Qt::Key to GhosttyKey (W3C UI Events physical codes). Returns
+// GHOSTTY_KEY_UNIDENTIFIED for keys we don't map yet.
+GhosttyKey qt_key_to_ghostty(int key) {
+    switch (key) {
+        // Letters
+        case Qt::Key_A: return GHOSTTY_KEY_A;
+        case Qt::Key_B: return GHOSTTY_KEY_B;
+        case Qt::Key_C: return GHOSTTY_KEY_C;
+        case Qt::Key_D: return GHOSTTY_KEY_D;
+        case Qt::Key_E: return GHOSTTY_KEY_E;
+        case Qt::Key_F: return GHOSTTY_KEY_F;
+        case Qt::Key_G: return GHOSTTY_KEY_G;
+        case Qt::Key_H: return GHOSTTY_KEY_H;
+        case Qt::Key_I: return GHOSTTY_KEY_I;
+        case Qt::Key_J: return GHOSTTY_KEY_J;
+        case Qt::Key_K: return GHOSTTY_KEY_K;
+        case Qt::Key_L: return GHOSTTY_KEY_L;
+        case Qt::Key_M: return GHOSTTY_KEY_M;
+        case Qt::Key_N: return GHOSTTY_KEY_N;
+        case Qt::Key_O: return GHOSTTY_KEY_O;
+        case Qt::Key_P: return GHOSTTY_KEY_P;
+        case Qt::Key_Q: return GHOSTTY_KEY_Q;
+        case Qt::Key_R: return GHOSTTY_KEY_R;
+        case Qt::Key_S: return GHOSTTY_KEY_S;
+        case Qt::Key_T: return GHOSTTY_KEY_T;
+        case Qt::Key_U: return GHOSTTY_KEY_U;
+        case Qt::Key_V: return GHOSTTY_KEY_V;
+        case Qt::Key_W: return GHOSTTY_KEY_W;
+        case Qt::Key_X: return GHOSTTY_KEY_X;
+        case Qt::Key_Y: return GHOSTTY_KEY_Y;
+        case Qt::Key_Z: return GHOSTTY_KEY_Z;
+        // Digits
+        case Qt::Key_0: return GHOSTTY_KEY_DIGIT_0;
+        case Qt::Key_1: return GHOSTTY_KEY_DIGIT_1;
+        case Qt::Key_2: return GHOSTTY_KEY_DIGIT_2;
+        case Qt::Key_3: return GHOSTTY_KEY_DIGIT_3;
+        case Qt::Key_4: return GHOSTTY_KEY_DIGIT_4;
+        case Qt::Key_5: return GHOSTTY_KEY_DIGIT_5;
+        case Qt::Key_6: return GHOSTTY_KEY_DIGIT_6;
+        case Qt::Key_7: return GHOSTTY_KEY_DIGIT_7;
+        case Qt::Key_8: return GHOSTTY_KEY_DIGIT_8;
+        case Qt::Key_9: return GHOSTTY_KEY_DIGIT_9;
+        // Punctuation
+        case Qt::Key_Minus:        return GHOSTTY_KEY_MINUS;
+        case Qt::Key_Equal:        return GHOSTTY_KEY_EQUAL;
+        case Qt::Key_BracketLeft:  return GHOSTTY_KEY_BRACKET_LEFT;
+        case Qt::Key_BracketRight: return GHOSTTY_KEY_BRACKET_RIGHT;
+        case Qt::Key_Backslash:    return GHOSTTY_KEY_BACKSLASH;
+        case Qt::Key_Semicolon:    return GHOSTTY_KEY_SEMICOLON;
+        case Qt::Key_Apostrophe:   return GHOSTTY_KEY_QUOTE;
+        case Qt::Key_Comma:        return GHOSTTY_KEY_COMMA;
+        case Qt::Key_Period:       return GHOSTTY_KEY_PERIOD;
+        case Qt::Key_Slash:        return GHOSTTY_KEY_SLASH;
+        case Qt::Key_QuoteLeft:    return GHOSTTY_KEY_BACKQUOTE;
+        // Functional / control
+        case Qt::Key_Return:   return GHOSTTY_KEY_ENTER;
+        case Qt::Key_Enter:    return GHOSTTY_KEY_NUMPAD_ENTER;
+        case Qt::Key_Backspace:return GHOSTTY_KEY_BACKSPACE;
+        case Qt::Key_Tab:      return GHOSTTY_KEY_TAB;
+        case Qt::Key_Space:    return GHOSTTY_KEY_SPACE;
+        case Qt::Key_Escape:   return GHOSTTY_KEY_ESCAPE;
+        case Qt::Key_CapsLock: return GHOSTTY_KEY_CAPS_LOCK;
+        case Qt::Key_Shift:    return GHOSTTY_KEY_SHIFT_LEFT;
+        case Qt::Key_Control:  return GHOSTTY_KEY_CONTROL_LEFT;
+        case Qt::Key_Alt:      return GHOSTTY_KEY_ALT_LEFT;
+        case Qt::Key_Meta:     return GHOSTTY_KEY_META_LEFT;
+        // Control pad
+        case Qt::Key_Delete:     return GHOSTTY_KEY_DELETE;
+        case Qt::Key_Insert:     return GHOSTTY_KEY_INSERT;
+        case Qt::Key_Home:       return GHOSTTY_KEY_HOME;
+        case Qt::Key_End:        return GHOSTTY_KEY_END;
+        case Qt::Key_PageUp:     return GHOSTTY_KEY_PAGE_UP;
+        case Qt::Key_PageDown:   return GHOSTTY_KEY_PAGE_DOWN;
+        case Qt::Key_Help:       return GHOSTTY_KEY_HELP;
+        // Arrow pad
+        case Qt::Key_Up:    return GHOSTTY_KEY_ARROW_UP;
+        case Qt::Key_Down:  return GHOSTTY_KEY_ARROW_DOWN;
+        case Qt::Key_Left:  return GHOSTTY_KEY_ARROW_LEFT;
+        case Qt::Key_Right: return GHOSTTY_KEY_ARROW_RIGHT;
+        // Numpad (with KeypadModifier)
+        case Qt::Key_NumLock:      return GHOSTTY_KEY_NUM_LOCK;
+        // Function keys
+        case Qt::Key_F1:  return GHOSTTY_KEY_F1;
+        case Qt::Key_F2:  return GHOSTTY_KEY_F2;
+        case Qt::Key_F3:  return GHOSTTY_KEY_F3;
+        case Qt::Key_F4:  return GHOSTTY_KEY_F4;
+        case Qt::Key_F5:  return GHOSTTY_KEY_F5;
+        case Qt::Key_F6:  return GHOSTTY_KEY_F6;
+        case Qt::Key_F7:  return GHOSTTY_KEY_F7;
+        case Qt::Key_F8:  return GHOSTTY_KEY_F8;
+        case Qt::Key_F9:  return GHOSTTY_KEY_F9;
+        case Qt::Key_F10: return GHOSTTY_KEY_F10;
+        case Qt::Key_F11: return GHOSTTY_KEY_F11;
+        case Qt::Key_F12: return GHOSTTY_KEY_F12;
+        case Qt::Key_F13: return GHOSTTY_KEY_F13;
+        case Qt::Key_F14: return GHOSTTY_KEY_F14;
+        case Qt::Key_F15: return GHOSTTY_KEY_F15;
+        case Qt::Key_F16: return GHOSTTY_KEY_F16;
+        case Qt::Key_F17: return GHOSTTY_KEY_F17;
+        case Qt::Key_F18: return GHOSTTY_KEY_F18;
+        case Qt::Key_F19: return GHOSTTY_KEY_F19;
+        case Qt::Key_F20: return GHOSTTY_KEY_F20;
+        case Qt::Key_F21: return GHOSTTY_KEY_F21;
+        case Qt::Key_F22: return GHOSTTY_KEY_F22;
+        case Qt::Key_F23: return GHOSTTY_KEY_F23;
+        case Qt::Key_F24: return GHOSTTY_KEY_F24;
+        case Qt::Key_F25: return GHOSTTY_KEY_F25;
+        // Lock / misc
+        case Qt::Key_ScrollLock: return GHOSTTY_KEY_SCROLL_LOCK;
+        case Qt::Key_Pause:      return GHOSTTY_KEY_PAUSE;
+        case Qt::Key_Print:      return GHOSTTY_KEY_PRINT_SCREEN;
+        case Qt::Key_Menu:       return GHOSTTY_KEY_CONTEXT_MENU;
+        default: return GHOSTTY_KEY_UNIDENTIFIED;
+    }
+}
+
+// Pick a GhosttyMouseAction for a press/release/move.
+uint32_t mouse_action_press()   { return GHOSTTY_MOUSE_ACTION_PRESS; }
+uint32_t mouse_action_release() { return GHOSTTY_MOUSE_ACTION_RELEASE; }
+uint32_t mouse_action_motion()  { return GHOSTTY_MOUSE_ACTION_MOTION; }
+
+// Translate Qt::MouseButton to GhosttyMouseButton. Returns 0 (UNKNOWN) for
+// "no button" (used for motion events).
+uint32_t qt_button_to_ghostty(Qt::MouseButtons b) {
+    if (b & Qt::LeftButton)   return GHOSTTY_MOUSE_BUTTON_LEFT;
+    if (b & Qt::RightButton)  return GHOSTTY_MOUSE_BUTTON_RIGHT;
+    if (b & Qt::MiddleButton) return GHOSTTY_MOUSE_BUTTON_MIDDLE;
+    if (b & Qt::BackButton)   return GHOSTTY_MOUSE_BUTTON_EIGHT;
+    if (b & Qt::ForwardButton)return GHOSTTY_MOUSE_BUTTON_NINE;
+    return GHOSTTY_MOUSE_BUTTON_UNKNOWN;
+}
+
+}  // namespace
+
+void TakoTerminalView::flushHostTitle() {
+    if (!m_surface) return;
+    char buf[512];
+    size_t n = tako_surface_take_title(
+        m_surface, reinterpret_cast<uint8_t *>(buf), sizeof(buf) - 1);
+    if (n > 0) {
+        buf[n] = '\0';
+        if (auto *w = window()) w->setTitle(QString::fromUtf8(buf));
+    }
+}
+
 void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
     forceActiveFocus();
+    if (!m_surface) { e->accept(); return; }
+
+    const bool mouse_tracking =
+        tako_surface_mouse_tracking(m_surface) != 0;
+
+    if (mouse_tracking) {
+        // Program wants raw events: forward to the encoder.
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        tako_surface_mouse_event(
+            m_surface, mouse_action_press(), qt_button_to_ghostty(e->button()),
+            static_cast<float>(p.x()) * dpr,
+            static_cast<float>(p.y()) * dpr,
+            qt_mods_to_ghostty(e->modifiers()));
+        m_anyMouseButtonHeld = true;
+        tako_surface_mouse_set_any_button(m_surface, true);
+    } else {
+        // Local selection: anchor start point here.
+        // TODO: selection engine.
+    }
     e->accept();
-    // TODO(phase-1-§5): drag selection (anchor + extent → cell range →
-    // PRIMARY selection), middle-click paste, SGR mouse forwarding.
+}
+
+void TakoTerminalView::mouseReleaseEvent(QMouseEvent *e) {
+    if (!m_surface) { e->accept(); return; }
+
+    const bool mouse_tracking =
+        tako_surface_mouse_tracking(m_surface) != 0;
+    if (mouse_tracking) {
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        tako_surface_mouse_event(
+            m_surface, mouse_action_release(),
+            qt_button_to_ghostty(e->button()),
+            static_cast<float>(p.x()) * dpr,
+            static_cast<float>(p.y()) * dpr,
+            qt_mods_to_ghostty(e->modifiers()));
+    }
+    // Any-button tracking state: recompute from current app mouse buttons.
+    const bool any_held =
+        (QGuiApplication::mouseButtons() != Qt::NoButton);
+    if (any_held != m_anyMouseButtonHeld) {
+        m_anyMouseButtonHeld = any_held;
+        tako_surface_mouse_set_any_button(m_surface, any_held);
+    }
+    e->accept();
+}
+
+void TakoTerminalView::mouseMoveEvent(QMouseEvent *e) {
+    if (!m_surface) { e->accept(); return; }
+    const bool mouse_tracking =
+        tako_surface_mouse_tracking(m_surface) != 0;
+    if (mouse_tracking) {
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        tako_surface_mouse_event(
+            m_surface, mouse_action_motion(), /*button=*/0,
+            static_cast<float>(p.x()) * dpr,
+            static_cast<float>(p.y()) * dpr,
+            qt_mods_to_ghostty(e->modifiers()));
+    }
+    // TODO: drag selection when not tracking.
+    e->accept();
+}
+
+void TakoTerminalView::wheelEvent(QWheelEvent *e) {
+    if (!m_surface) { e->accept(); return; }
+
+    // Mouse-wheel scrolling: when mouse tracking is on, encode as button-4/5
+    // events. Otherwise, scroll the local viewport directly (alternate-screen
+    // applications like less/vim enable mode 1007 / mouse tracking, so this
+    // branch is reached only when the program is *not* capturing the wheel).
+    const bool mouse_tracking =
+        tako_surface_mouse_tracking(m_surface) != 0;
+    const QPointF deg = e->angleDelta() / 8.0;
+    if (mouse_tracking) {
+        // Vertical wheel → button 4 (up) / 5 (down); horizontal → 6 / 7.
+        const int vsteps = deg.y() > 0
+                               ? (deg.y() / 15.0) + 0.5
+                               : -((-deg.y() / 15.0) + 0.5);
+        for (int i = 0; i < std::abs(vsteps); ++i) {
+            uint32_t btn = (vsteps > 0) ? 4 : 5;  // GHOSTTY_MOUSE_BUTTON_FOUR/FIVE
+            const float dpr = windowDpr();
+            const QPointF p = e->position();
+            tako_surface_mouse_event(
+                m_surface, mouse_action_press(), btn,
+                static_cast<float>(p.x()) * dpr,
+                static_cast<float>(p.y()) * dpr,
+                qt_mods_to_ghostty(e->modifiers()));
+            tako_surface_mouse_event(
+                m_surface, mouse_action_release(), btn,
+                static_cast<float>(p.x()) * dpr,
+                static_cast<float>(p.y()) * dpr,
+                qt_mods_to_ghostty(e->modifiers()));
+        }
+    } else {
+        // Scroll the viewport by lines. ±15 degrees ≈ one notch = 3 lines
+        // (xterm default).
+        const int lines = static_cast<int>(std::round(deg.y() / 5.0));
+        if (lines != 0) {
+            tako_surface_scroll(m_surface, /*delta_rows=*/-lines);
+        }
+    }
+    e->accept();
+}
+
+void TakoTerminalView::focusInEvent(QFocusEvent *e) {
+    if (m_surface) tako_surface_focus_event(m_surface, /*gained=*/true);
+    e->accept();
+}
+
+void TakoTerminalView::focusOutEvent(QFocusEvent *e) {
+    if (m_surface) tako_surface_focus_event(m_surface, /*gained=*/false);
+    e->accept();
 }
 
 // ---- keyboard input ----
 //
-// Translate QKeyEvent into bytes a terminal expects and feed the PTY. Full
-// modifier-aware CSI / Kitty protocol lands in P5 via libghostty-vt's key
-// encoder; this hand-rolled table is the spike.
+// Translate QKeyEvent to a GhosttyKey + mods and hand off to libghostty-vt's
+// encoder (which honors DEC modes 1, 66, 1036, modifyOtherKeys, Kitty
+// keyboard, etc. — no hand-rolled tables on our side).
 
 void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
     if (!m_surface) {
@@ -196,119 +491,63 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
         return;
     }
 
-    const int key = e->key();
-    const Qt::KeyboardModifiers mods = e->modifiers();
-    const QString text = e->text();
-    QByteArray bytes;
-
-    const bool ctrl = mods & Qt::ControlModifier;
-
-    if (ctrl && key >= Qt::Key_A && key <= Qt::Key_Z) {
-        bytes.append(static_cast<char>(key - Qt::Key_A + 1));
-    } else if (ctrl && key == Qt::Key_BracketLeft) {
-        bytes.append('\x1b');
-    } else if (ctrl && key == Qt::Key_Backslash) {
-        bytes.append('\x1c');
-    } else if (ctrl && key == Qt::Key_BracketRight) {
-        bytes.append('\x1d');
-    } else if (ctrl && (key == Qt::Key_At || key == Qt::Key_Space)) {
-        bytes.append('\x00');
-    } else {
-        switch (key) {
-            case Qt::Key_Return:
-            case Qt::Key_Enter:
-                bytes.append('\r');
-                break;
-            case Qt::Key_Backspace:
-                bytes.append('\x7f');
-                break;
-            case Qt::Key_Tab:
-                bytes.append('\t');
-                break;
-            case Qt::Key_Escape:
-                bytes.append('\x1b');
-                break;
-            case Qt::Key_Up:
-                bytes.append("\x1b[A");
-                break;
-            case Qt::Key_Down:
-                bytes.append("\x1b[B");
-                break;
-            case Qt::Key_Right:
-                bytes.append("\x1b[C");
-                break;
-            case Qt::Key_Left:
-                bytes.append("\x1b[D");
-                break;
-            case Qt::Key_Home:
-                bytes.append("\x1b[H");
-                break;
-            case Qt::Key_End:
-                bytes.append("\x1b[F");
-                break;
-            case Qt::Key_PageUp:
-                bytes.append("\x1b[5~");
-                break;
-            case Qt::Key_PageDown:
-                bytes.append("\x1b[6~");
-                break;
-            case Qt::Key_Insert:
-                bytes.append("\x1b[2~");
-                break;
-            case Qt::Key_Delete:
-                bytes.append("\x1b[3~");
-                break;
-            case Qt::Key_F1:
-                bytes.append("\x1bOP");
-                break;
-            case Qt::Key_F2:
-                bytes.append("\x1bOQ");
-                break;
-            case Qt::Key_F3:
-                bytes.append("\x1bOR");
-                break;
-            case Qt::Key_F4:
-                bytes.append("\x1bOS");
-                break;
-            case Qt::Key_F5:
-                bytes.append("\x1b[15~");
-                break;
-            case Qt::Key_F6:
-                bytes.append("\x1b[17~");
-                break;
-            case Qt::Key_F7:
-                bytes.append("\x1b[18~");
-                break;
-            case Qt::Key_F8:
-                bytes.append("\x1b[19~");
-                break;
-            case Qt::Key_F9:
-                bytes.append("\x1b[20~");
-                break;
-            case Qt::Key_F10:
-                bytes.append("\x1b[21~");
-                break;
-            case Qt::Key_F11:
-                bytes.append("\x1b[23~");
-                break;
-            case Qt::Key_F12:
-                bytes.append("\x1b[24~");
-                break;
-            default:
-                if (!text.isEmpty()) {
-                    bytes.append(text.toUtf8());
-                } else {
-                    QQuickFramebufferObject::keyPressEvent(e);
-                    return;
-                }
+    const GhosttyKey key = qt_key_to_ghostty(e->key());
+    if (key == GHOSTTY_KEY_UNIDENTIFIED) {
+        // Fallback: if the event carries printable text, send it raw.
+        const QString text = e->text();
+        if (!text.isEmpty()) {
+            const QByteArray bytes = text.toUtf8();
+            tako_surface_write(
+                m_surface,
+                reinterpret_cast<const uint8_t *>(bytes.constData()),
+                static_cast<size_t>(bytes.size()));
+            e->accept();
+            return;
         }
+        QQuickFramebufferObject::keyPressEvent(e);
+        return;
     }
 
-    if (!bytes.isEmpty()) {
-        tako_surface_write(m_surface,
-                           reinterpret_cast<const uint8_t *>(bytes.constData()),
-                           static_cast<size_t>(bytes.size()));
+    const uint16_t mods = qt_mods_to_ghostty(e->modifiers());
+    const uint16_t consumed_mods = mods;  // we let the encoder decide.
+
+    // UTF-8 text the key produced. The encoder strips C0 controls for us.
+    const QString text = e->text();
+    const QByteArray text_bytes = text.toUtf8();
+    const uint8_t *text_ptr =
+        text_bytes.isEmpty() ? nullptr
+                              : reinterpret_cast<const uint8_t *>(text_bytes.constData());
+    const size_t text_len = static_cast<size_t>(text_bytes.size());
+
+    // Action: PRESS / REPEAT / RELEASE.
+    uint32_t action = GHOSTTY_KEY_ACTION_PRESS;
+    if (e->isAutoRepeat()) action = GHOSTTY_KEY_ACTION_REPEAT;
+
+    tako_surface_key_event(m_surface, action, static_cast<uint32_t>(key),
+                           mods, consumed_mods, text_ptr, text_len);
+    e->accept();
+}
+
+void TakoTerminalView::keyReleaseEvent(QKeyEvent *e) {
+    if (!m_surface) {
+        QQuickFramebufferObject::keyReleaseEvent(e);
+        return;
     }
+    // Qt sometimes emits autorepeat on release; libghostty-vt wants a true
+    // release only on the final key-up.
+    if (e->isAutoRepeat()) {
+        e->accept();
+        return;
+    }
+    const GhosttyKey key = qt_key_to_ghostty(e->key());
+    if (key == GHOSTTY_KEY_UNIDENTIFIED) {
+        e->accept();
+        return;
+    }
+    const uint16_t mods = qt_mods_to_ghostty(e->modifiers());
+    tako_surface_key_event(m_surface, GHOSTTY_KEY_ACTION_RELEASE,
+                           static_cast<uint32_t>(key), mods, mods,
+                           nullptr, 0);
     e->accept();
 }
 

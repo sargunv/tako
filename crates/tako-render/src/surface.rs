@@ -19,8 +19,14 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::process::Command;
 use std::ptr;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tako_term::effects::TerminalEffects;
+use tako_term::input as vt_input;
+use tako_term::key::{KeyEncoder, KeyEvent};
+use tako_term::modes;
+use tako_term::mouse::{MouseEncoder, MouseEvent};
 use tako_term::pty::StreamingPty;
 use tako_term::snapshot::FrameSnapshot;
 use tako_term::terminal::{RenderState, Terminal};
@@ -102,6 +108,38 @@ struct Autorun {
     fired: bool,
 }
 
+/// State shared between the Surface (GUI thread) and the effects callbacks
+/// (invoked synchronously inside `ghostty_terminal_vt_write`, also on the GUI
+/// thread — but the closures need to outlive the borrow that creates them).
+///
+/// `Arc<Mutex<_>>` is overkill in the single-threaded case but cheap and
+/// removes a class of soundness footguns if the threading model ever changes.
+#[derive(Default)]
+struct Shared {
+    /// Bytes the `write_pty` effect produced during the most recent
+    /// `vt_write`. Drained by the next tick and forwarded to the PTY. Holding
+    /// them here (rather than writing inside the callback) keeps the callback
+    /// re-entrancy-safe: we never touch the writer mid-`vt_write`.
+    pty_response: Vec<u8>,
+    /// Set by `title_changed`; tick snapshots `terminal.title()` after.
+    title_dirty: bool,
+    /// Set by `pwd_changed`; tick snapshots `terminal.pwd()` after.
+    pwd_dirty: bool,
+    /// Bell rang since the last tick (KNotification bridge pending).
+    bell_count: u32,
+}
+
+/// Snapshot of the cell metrics + grid size, read by the XTWINOPS size
+/// callback. Held in an `Arc<Mutex<_>>` so the closure can query it without
+/// borrowing the Surface.
+#[derive(Clone, Copy)]
+struct MetricsSnapshot {
+    cols: u16,
+    rows: u16,
+    cell_w: u32,
+    cell_h: u32,
+}
+
 /// A live terminal surface. Drop closes the PTY and frees everything.
 pub struct Surface {
     terminal: Terminal,
@@ -131,6 +169,28 @@ pub struct Surface {
     /// [`Surface::set_dpr`]) reloads the font at the new physical size and
     /// invalidates size-dependent caches.
     dpr: f32,
+
+    /// Shared state between the Surface and the effects callbacks.
+    shared: Arc<Mutex<Shared>>,
+    /// Cell metrics snapshot, kept in sync with `cell`/`cols`/`rows` for the
+    /// size query callback.
+    metrics: Arc<Mutex<MetricsSnapshot>>,
+    /// Latest window title snapshotted from the terminal (OSC 0/2).
+    title: String,
+    /// Latest pwd snapshotted from the terminal (OSC 7/9/1337).
+    pwd: String,
+
+    /// Key/mouse encoders reused across events (they own mode-state caches).
+    key_encoder: KeyEncoder,
+    mouse_encoder: MouseEncoder,
+    /// Scratch event handles reused per keystroke / per mouse event (cheap
+    /// allocation amortized across thousands of events).
+    key_event: KeyEvent,
+    mouse_event: MouseEvent,
+
+    /// Latest window title as observed by the host (C++ QML window title).
+    /// Read via [`Surface::take_host_events`] each tick.
+    host_title: Option<String>,
 }
 
 impl Surface {
@@ -146,11 +206,8 @@ impl Surface {
         logical_pixel_height: u32,
         dpr: f32,
     ) -> Result<Self, String> {
-        let terminal =
-            Terminal::new(cols, rows, 10_000).map_err(|e| format!("terminal_new: {e}"))?;
-        let state = RenderState::new().map_err(|e| format!("render_state_new: {e}"))?;
-        let pty = StreamingPty::spawn_shell(cols, rows).map_err(|e| format!("spawn shell: {e}"))?;
-
+        // Resolve the font + cell metrics first so the size callback can read
+        // them. (The other branches of this constructor only use them later.)
         let path = match font_path {
             Some(p) => p.to_string(),
             None => resolve_default_font()?,
@@ -159,6 +216,61 @@ impl Surface {
         let font =
             FontFace::from_path(&path, physical_px).map_err(|e| format!("font load: {e}"))?;
         let cell = font.cell_metrics();
+
+        // Build the shared state + effects BEFORE the terminal so the
+        // write_pty closure can clone the Arc and append response bytes.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let shared_for_write = Arc::clone(&shared);
+        let shared_for_bell = Arc::clone(&shared);
+        let shared_for_title = Arc::clone(&shared);
+        let shared_for_pwd = Arc::clone(&shared);
+
+        // Size query is read-only state. Stash the cell metrics + grid size in
+        // an Arc so the closure can read them without borrowing the Surface.
+        // Updated by `resize_to_pixels` and `set_dpr` after construction.
+        let metrics = Arc::new(Mutex::new(MetricsSnapshot {
+            cols,
+            rows,
+            cell_w: cell.width,
+            cell_h: cell.height,
+        }));
+        let metrics_for_size = Arc::clone(&metrics);
+
+        let effects = TerminalEffects::new()
+            .with_write_pty(move |bytes: &[u8]| {
+                if let Ok(mut g) = shared_for_write.lock() {
+                    g.pty_response.extend_from_slice(bytes);
+                }
+            })
+            .with_bell(move || {
+                if let Ok(mut g) = shared_for_bell.lock() {
+                    g.bell_count = g.bell_count.saturating_add(1);
+                }
+            })
+            .with_title_changed(move || {
+                if let Ok(mut g) = shared_for_title.lock() {
+                    g.title_dirty = true;
+                }
+            })
+            .with_pwd_changed(move || {
+                if let Ok(mut g) = shared_for_pwd.lock() {
+                    g.pwd_dirty = true;
+                }
+            })
+            .with_size(move || {
+                let m = metrics_for_size.lock().expect("metrics poisoned");
+                tako_term::effects::SizeInfo {
+                    cols: m.cols,
+                    rows: m.rows,
+                    cell_w_px: m.cell_w,
+                    cell_h_px: m.cell_h,
+                }
+            });
+
+        let terminal = Terminal::new_with_effects(cols, rows, 10_000, effects)
+            .map_err(|e| format!("terminal_new: {e}"))?;
+        let state = RenderState::new().map_err(|e| format!("render_state_new: {e}"))?;
+        let pty = StreamingPty::spawn_shell(cols, rows).map_err(|e| format!("spawn shell: {e}"))?;
 
         // Empty atlas to start; filled on the first tick. raster_cache is
         // declared alongside so we can move it into Self below.
@@ -176,6 +288,11 @@ impl Surface {
             cmd: format!("{cmd}\n").into_bytes(),
             fired: false,
         });
+
+        let key_encoder = KeyEncoder::new().map_err(|e| format!("key_encoder_new: {e}"))?;
+        let mouse_encoder = MouseEncoder::new().map_err(|e| format!("mouse_encoder_new: {e}"))?;
+        let key_event = KeyEvent::new().map_err(|e| format!("key_event_new: {e}"))?;
+        let mouse_event = MouseEvent::new().map_err(|e| format!("mouse_event_new: {e}"))?;
 
         Ok(Self {
             terminal,
@@ -195,6 +312,15 @@ impl Surface {
             font_path: path,
             logical_pixel_height,
             dpr,
+            shared,
+            metrics,
+            title: String::new(),
+            pwd: String::new(),
+            key_encoder,
+            mouse_encoder,
+            key_event,
+            mouse_event,
+            host_title: None,
         })
     }
 
@@ -229,6 +355,15 @@ impl Surface {
         self.atlas =
             GlyphAtlas::from_glyph_advances(&self.font, &HashMap::new(), &mut self.raster_cache);
         self.atlas_generation = self.atlas_generation.wrapping_add(1);
+        // Refresh the size-query snapshot with the new cell metrics.
+        if let Ok(mut m) = self.metrics.lock() {
+            *m = MetricsSnapshot {
+                cols: self.cols,
+                rows: self.rows,
+                cell_w: self.cell.width,
+                cell_h: self.cell.height,
+            };
+        }
     }
 
     pub fn cols(&self) -> u16 {
@@ -267,11 +402,115 @@ impl Surface {
         if let Err(e) = self.pty.resize(cols, rows) {
             eprintln!("[surface] pty resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}");
         }
+        // Keep the mouse encoder's size context in sync so coordinate mapping
+        // (surface px → cell coords) stays correct.
+        self.mouse_encoder
+            .set_size(cols as u32 * cw, rows as u32 * ch, cw, ch, 0);
+        // Keep the XTWINOPS size-query snapshot in sync.
+        if let Ok(mut m) = self.metrics.lock() {
+            *m = MetricsSnapshot {
+                cols,
+                rows,
+                cell_w: cw,
+                cell_h: ch,
+            };
+        }
     }
 
     /// Send typed input (keyboard) to the shell.
     pub fn write_input(&mut self, bytes: &[u8]) {
         let _ = self.pty.write(bytes);
+    }
+
+    /// Encode and send a key event. `key` is a `GhosttyKey` enum value;
+    /// `mods`/`consumed_mods` are `GhosttyMods` bitmasks; `text` is the
+    /// UTF-8 text the key produced (or `None` to let the encoder derive it).
+    pub fn key_event(
+        &mut self,
+        action: tako_term::ffi::GhosttyKeyAction,
+        key: tako_term::ffi::GhosttyKey,
+        mods: u16,
+        consumed_mods: u16,
+        text: Option<&[u8]>,
+    ) {
+        self.key_event.set_action(action);
+        self.key_event.set_key(key);
+        self.key_event.set_mods(mods);
+        self.key_event.set_consumed_mods(consumed_mods);
+        self.key_event.set_utf8(text);
+        let bytes = self.key_encoder.encode(&self.terminal, &self.key_event);
+        if !bytes.is_empty() {
+            let _ = self.pty.write(&bytes);
+        }
+    }
+
+    /// Encode and send a mouse event. Position is in surface-space pixels.
+    /// `button` is `None` for motion events; pass the actual button for
+    /// press/release. `mods` is a `GhosttyMods` bitmask.
+    pub fn mouse_event(
+        &mut self,
+        action: tako_term::ffi::GhosttyMouseAction,
+        button: Option<tako_term::ffi::GhosttyMouseButton>,
+        x_px: f32,
+        y_px: f32,
+        mods: u16,
+    ) {
+        self.mouse_event.set_action(action);
+        match button {
+            Some(b) => self.mouse_event.set_button(b),
+            None => self.mouse_event.clear_button(),
+        }
+        self.mouse_event.set_mods(mods);
+        self.mouse_event.set_position(x_px, y_px);
+        let bytes = self.mouse_encoder.encode(&self.terminal, &self.mouse_event);
+        if !bytes.is_empty() {
+            let _ = self.pty.write(&bytes);
+        }
+    }
+
+    /// Tell the encoder whether any button is held (drives any-event motion
+    /// dedup). Call on press/release; the encoder does not query this itself.
+    pub fn mouse_set_any_button(&mut self, pressed: bool) {
+        self.mouse_encoder.set_any_button_pressed(pressed);
+    }
+
+    /// Focus gained/lost. No-op when focus reporting (DEC mode 1004) is off.
+    pub fn focus_event(&mut self, gained: bool) {
+        if self.terminal.mode_get(modes::FOCUS_EVENT) {
+            let bytes = vt_input::encode_focus(gained);
+            if !bytes.is_empty() {
+                let _ = self.pty.write(&bytes);
+            }
+        }
+    }
+
+    /// Paste bytes into the terminal, wrapping in bracketed paste sequences
+    /// when DEC mode 2004 is set.
+    pub fn paste(&mut self, data: &[u8]) {
+        let bracketed = self.terminal.mode_get(modes::BRACKETED_PASTE);
+        let bytes = vt_input::paste_encode(data, bracketed);
+        if !bytes.is_empty() {
+            let _ = self.pty.write(&bytes);
+        }
+    }
+
+    /// Scroll the viewport by `delta_rows` (negative = up into history,
+    /// positive = down toward active area).
+    pub fn scroll(&mut self, delta_rows: i64) {
+        self.terminal
+            .scroll_viewport(vt_input::Scroll::Delta(delta_rows));
+    }
+
+    /// `true` if any mouse tracking mode is on — drives the report-vs-select
+    /// policy in the embedder.
+    pub fn mouse_tracking(&self) -> bool {
+        self.terminal.mouse_tracking()
+    }
+
+    /// Take the latest host-bound window title, if it changed since the last
+    /// call. C++ uses this to update the QML window title.
+    pub fn take_host_title(&mut self) -> Option<String> {
+        self.host_title.take()
     }
 
     /// Drain PTY output, advance the terminal, and rebuild the frame plan.
@@ -296,6 +535,49 @@ impl Surface {
         let t_drain = Instant::now();
         if !bytes.is_empty() {
             self.terminal.vt_write(&bytes);
+        }
+        // Drain any PTY-bound response bytes the effects callbacks produced
+        // during vt_write (DA1/XTVERSION/focus/mouse/etc.). Doing it here
+        // keeps the callback re-entrancy-safe — it only appends to a buffer.
+        let pty_response: Vec<u8> = {
+            let mut g = self.shared.lock().expect("effects shared state poisoned");
+            std::mem::take(&mut g.pty_response)
+        };
+        if !pty_response.is_empty() {
+            let _ = self.pty.write(&pty_response);
+        }
+        // Snapshot title/pwd if the callbacks flagged them. We must read
+        // these now, before the next vt_write invalidates the borrow.
+        {
+            let g = self.shared.lock().expect("effects shared state poisoned");
+            let title_dirty = g.title_dirty;
+            let pwd_dirty = g.pwd_dirty;
+            let bell_count = g.bell_count;
+            drop(g);
+            if title_dirty {
+                let t = self.terminal.title().to_vec();
+                let new_title = String::from_utf8_lossy(&t).into_owned();
+                if new_title != self.title {
+                    self.title = new_title.clone();
+                    self.host_title = Some(new_title);
+                }
+                if let Ok(mut g) = self.shared.lock() {
+                    g.title_dirty = false;
+                }
+            }
+            if pwd_dirty {
+                let p = self.terminal.pwd().to_vec();
+                self.pwd = String::from_utf8_lossy(&p).into_owned();
+                if let Ok(mut g) = self.shared.lock() {
+                    g.pwd_dirty = false;
+                }
+            }
+            if bell_count > 0 {
+                // TODO: KNotification bridge.
+                if let Ok(mut g) = self.shared.lock() {
+                    g.bell_count = 0;
+                }
+            }
         }
         let t_vt = Instant::now();
         let snap = FrameSnapshot::capture(&mut self.terminal, &mut self.state);
@@ -528,21 +810,94 @@ impl Surface {
 
         // Cursor: drawn last so it layers on top of any glyph beneath it.
         // Sentinel UV (-1,-1) signals the shader to synthesize coverage 1.0.
+        // The cursor is sized/positioned by its visual style (DECSCUSR):
+        //   Block       — full cell (default).
+        //   Bar         — left ~1/8 of cell.
+        //   Underline   — bottom ~1/8 of cell.
+        //   BlockHollow — full cell with inverted fg/bg; we draw a thin border
+        //                 approximation (4 quads) since our shader has no
+        //                 outline primitive.
         if let Some((cx, cy)) = snap.cursor.viewport
             && snap.cursor.visible
         {
             let color = snap.colors.cursor.unwrap_or(snap.colors.foreground);
-            push_quad(
-                cx as f32 * cw,
-                cy as f32 * ch,
-                cw,
-                ch,
-                FLAT_UV,
-                FLAT_UV,
-                FLAT_UV,
-                FLAT_UV,
-                (color.r, color.g, color.b),
-            );
+            let px = cx as f32 * cw;
+            let py = cy as f32 * ch;
+            match snap.cursor.style {
+                tako_term::snapshot::CursorStyle::BlockHollow => {
+                    // Hollow block: draw a frame (4 thin quads) using the
+                    // foreground color so the cursor stands out against any bg.
+                    let bg = snap.colors.foreground;
+                    let thickness = (cw.min(ch) * 0.1).max(1.0);
+                    for &(y, h) in &[(py, thickness), (py + ch - thickness, thickness)] {
+                        push_quad(
+                            px,
+                            y,
+                            cw,
+                            h,
+                            FLAT_UV,
+                            FLAT_UV,
+                            FLAT_UV,
+                            FLAT_UV,
+                            (bg.r, bg.g, bg.b),
+                        );
+                    }
+                    for &(x, w) in &[(px, thickness), (px + cw - thickness, thickness)] {
+                        push_quad(
+                            x,
+                            py + thickness,
+                            w,
+                            ch - 2.0 * thickness,
+                            FLAT_UV,
+                            FLAT_UV,
+                            FLAT_UV,
+                            FLAT_UV,
+                            (bg.r, bg.g, bg.b),
+                        );
+                    }
+                }
+                tako_term::snapshot::CursorStyle::Bar => {
+                    push_quad(
+                        px,
+                        py,
+                        (cw * 0.125).max(1.0),
+                        ch,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        (color.r, color.g, color.b),
+                    );
+                }
+                tako_term::snapshot::CursorStyle::Underline => {
+                    let h = (ch * 0.125).max(1.0);
+                    push_quad(
+                        px,
+                        py + ch - h,
+                        cw,
+                        h,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        (color.r, color.g, color.b),
+                    );
+                }
+                tako_term::snapshot::CursorStyle::Block => {
+                    push_quad(
+                        px,
+                        py,
+                        cw,
+                        ch,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        FLAT_UV,
+                        (color.r, color.g, color.b),
+                    );
+                }
+            }
+            // TODO: blink phase (Cursor.blinking + Cursor.password_input).
         }
 
         self.vertex_buf = verts;
@@ -747,6 +1102,173 @@ pub unsafe extern "C" fn tako_surface_set_dpr(s: *mut Surface, dpr: f32) {
     }
     let surface = unsafe { &mut *s };
     surface.set_dpr(dpr);
+}
+
+// ---- input ----
+//
+// The C ABI passes libghostty-vt enum values directly (defined in
+// `tako_term::ffi`). C++ includes the matching C headers via
+// `<ghostty/vt/key/event.h>` and `<ghostty/vt/mouse/event.h>`.
+
+/// Encode and forward a key event to the PTY.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`]. If
+/// `text_len > 0`, `text` must point to `text_len` valid UTF-8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_key_event(
+    s: *mut Surface,
+    action: u32,
+    key: u32,
+    mods: u16,
+    consumed_mods: u16,
+    text: *const u8,
+    text_len: usize,
+) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    let text = if text.is_null() || text_len == 0 {
+        None
+    } else {
+        Some(unsafe { std::slice::from_raw_parts(text, text_len) })
+    };
+    surface.key_event(action, key, mods, consumed_mods, text);
+}
+
+/// Encode and forward a mouse event to the PTY. `button` 0 = UNKNOWN (use
+/// for motion); mouse tracking is checked inside the encoder.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_mouse_event(
+    s: *mut Surface,
+    action: u32,
+    button: u32,
+    x_px: f32,
+    y_px: f32,
+    mods: u16,
+) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    let button = if button == 0 { None } else { Some(button) };
+    surface.mouse_event(action, button, x_px, y_px, mods);
+}
+
+/// Tell the surface whether any mouse button is currently held (drives
+/// any-event motion reporting).
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_mouse_set_any_button(s: *mut Surface, pressed: bool) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    surface.mouse_set_any_button(pressed);
+}
+
+/// Focus gained/lost. Forwards focus-reporting bytes to the PTY iff DEC mode
+/// 1004 is set.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_focus_event(s: *mut Surface, gained: bool) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    surface.focus_event(gained);
+}
+
+/// Paste bytes into the terminal (with bracketed paste wrapping if mode 2004
+/// is set).
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`]. `data`
+/// must point to `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_paste(s: *mut Surface, data: *const u8, len: usize) {
+    if s.is_null() || data.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    let slice = unsafe { std::slice::from_raw_parts(data, len) };
+    surface.paste(slice);
+}
+
+/// Scroll the viewport by `delta_rows` (negative = up into history).
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_scroll(s: *mut Surface, delta_rows: i64) {
+    if s.is_null() {
+        return;
+    }
+    let surface = unsafe { &mut *s };
+    surface.scroll(delta_rows);
+}
+
+/// Returns 1 if any mouse tracking mode is on (embedder should forward mouse
+/// events to the PTY rather than do selection), 0 otherwise.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_mouse_tracking(s: *mut Surface) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    let surface = unsafe { &*s };
+    i32::from(surface.mouse_tracking())
+}
+
+/// Take the latest window title, if it changed. Returns the length written
+/// into `out_buf` (excluding NUL). Returns 0 when there is no new title or
+/// `out_buf` is too small; the caller should pass a buffer of at least 256 B.
+/// A NUL terminator is written after the title bytes.
+///
+/// # Safety
+///
+/// `s` must be a valid [`Surface`] pointer from [`tako_surface_new`].
+/// `out_buf` must point to `cap` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_take_title(
+    s: *mut Surface,
+    out_buf: *mut u8,
+    cap: usize,
+) -> usize {
+    if s.is_null() || out_buf.is_null() || cap == 0 {
+        return 0;
+    }
+    let surface = unsafe { &mut *s };
+    let Some(title) = surface.take_host_title() else {
+        return 0;
+    };
+    let bytes = title.as_bytes();
+    // Need 1 byte for NUL terminator.
+    if bytes.len() + 1 > cap {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        *out_buf.add(bytes.len()) = 0;
+    }
+    bytes.len()
 }
 
 // Keep CString reachable for the FFI doc; avoids dead-code churn if unused.

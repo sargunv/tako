@@ -21,13 +21,4 @@ ApplicationWindow {
         focus: true
         Component.onCompleted: term.forceActiveFocus()
     }
-
-    Label {
-        text: qsTr("Phase 1 P4: hidpi rasterization. Effects/encoders next.")
-        color: palette.text
-        anchors.bottom: parent.bottom
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.margins: 6
-    }
 }
-

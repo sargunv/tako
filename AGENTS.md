@@ -61,11 +61,12 @@ required.
 
 <!-- List non-negotiable rules for the project as they emerge. -->
 
-- **`unsafe_code` is denied workspace-wide.** The only permitted exception is a
-  cxx-qt `#[cxx_qt::bridge]` module, which needs `unsafe extern` blocks (edition
-  2024 FFI syntax). Scope the relaxation with a module-level
-  `#![allow(unsafe_code)]` inside the bridge file only — never relax at crate or
-  workspace level.
+- **`unsafe_code` is denied workspace-wide.** The only permitted exceptions are
+  a cxx-qt `#[cxx_qt::bridge]` module, which needs `unsafe extern` blocks
+  (edition 2024 FFI syntax), and `crates/tako-app/build.rs`, which needs an
+  `unsafe` `cc_builder` closure (cxx-qt-build 0.9's only flag-passing API).
+  Scope the relaxation with a module-level `#![allow(unsafe_code)]` inside the
+  bridge file or `build.rs` only — never relax at crate or workspace level.
 - **Qt is discovered via `qmake` on PATH.** `mise.toml` sets
   `QT_VERSION_MAJOR=6` so cxx-qt-build picks the Qt6 `qmake6`. Keep that env var
   when adding any Qt-linking crate.
@@ -83,3 +84,18 @@ required.
   registrations). The registration C ABI lives in the C++ file; the safe Rust
   wrapper is `tako_render::qml_init::register_qml_types()`, called from
   `tako_app::run()` before `engine.load`.
+- **bindgen needs the clang resource include path.** On systems with
+  `clang-libs` but not `clang-devel` (e.g. Fedora default), libclang can't
+  locate `<limits.h>` and bindgen fails with
+  `fatal error: 'limits.h' file not
+  found`. `tako-term/build.rs` probes
+  `/usr/lib/clang/<major>/include/` and passes `-resource-dir=<parent>` so the
+  built-in headers are found. Adding new libghostty-vt headers that pull in more
+  stdarg/stdint types can re-trip this on a fresh toolchain.
+- **C++ view code includes libghostty-vt enum headers.** The C++
+  `TakoTerminalView` pulls in `<ghostty/vt/key/event.h>` and
+  `<ghostty/vt/mouse/event.h>` for the enum constants (`GHOSTTY_KEY_*`,
+  `GHOSTTY_MODS_*`, `GHOSTTY_MOUSE_*`). `tako-app/build.rs` resolves the include
+  path from the tako-term cache and passes it via `CxxQtBuilder::include_dir`.
+  If you add new enum usage to C++, rebuild `tako-term` first (its build script
+  fetches the headers).

@@ -19,9 +19,15 @@ pub mod ffi {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
+pub mod effects;
+pub mod input;
+pub mod modes;
+pub mod mouse;
 pub mod pty;
 pub mod snapshot;
 pub mod terminal;
+
+pub mod key;
 
 use core::fmt;
 

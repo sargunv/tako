@@ -7,24 +7,30 @@
 //! render-state API documents: only the [`RenderState::update`] call needs
 //! exclusive access to the [`Terminal`], and it is short.
 
+use std::ffi::c_void;
+
 use crate::Error;
+use crate::effects::TerminalEffects;
 use crate::ffi;
 
 /// A complete terminal emulator instance: screen, scrollback, cursor, modes,
 /// and VT stream parser. Owns the underlying `GhosttyTerminal` handle and
 /// frees it on drop.
+///
+/// When created with [`Terminal::new_with_effects`], also owns a boxed
+/// `TerminalEffects` registered as the terminal's userdata; the box is freed
+/// after the underlying handle on `Drop`.
 pub struct Terminal {
     raw: ffi::GhosttyTerminal,
-}
-
-/// A render state snapshot of a [`Terminal`]: viewport cells, cursor, colors,
-/// and dirty tracking. Owns the underlying `GhosttyRenderState` handle.
-pub struct RenderState {
-    raw: ffi::GhosttyRenderState,
+    /// Boxed userdata pointer if effects are registered, null otherwise.
+    /// Freed in `Drop` after `ghostty_terminal_free`.
+    effects: *mut c_void,
 }
 
 impl Terminal {
-    /// Create a new terminal of the given cell dimensions and scrollback cap.
+    /// Create a new terminal of the given cell dimensions and scrollback cap,
+    /// with no effects registered. Most programs (vim, tmux, less) require
+    /// query responses — use [`Terminal::new_with_effects`] for those.
     pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self, Error> {
         assert!(cols > 0 && rows > 0, "terminal cols/rows must be > 0");
         let opts = ffi::GhosttyTerminalOptions {
@@ -47,7 +53,26 @@ impl Terminal {
             !raw.is_null(),
             "ghostty_terminal_new returned success but null handle"
         );
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            effects: core::ptr::null_mut(),
+        })
+    }
+
+    /// Create a terminal and register the given effects (write_pty, bell,
+    /// title_changed, etc.) on it. The terminal owns the boxed effects; the
+    /// box is freed after `ghostty_terminal_free` on drop.
+    pub fn new_with_effects(
+        cols: u16,
+        rows: u16,
+        max_scrollback: usize,
+        effects: TerminalEffects,
+    ) -> Result<Self, Error> {
+        let mut term = Self::new(cols, rows, max_scrollback)?;
+        // SAFETY: term.raw is freshly created and valid. The returned pointer
+        // is stored and freed in Drop.
+        term.effects = unsafe { crate::effects::register(term.raw, effects) };
+        Ok(term)
     }
 
     /// Feed raw PTY/VT bytes into the terminal's stream parser. This never
@@ -78,7 +103,8 @@ impl Terminal {
         unsafe { ffi::ghostty_terminal_reset(self.raw) };
     }
 
-    /// Crate-private raw handle, for the snapshot walker in [`crate::snapshot`].
+    /// Crate-private raw handle, for the snapshot walker in [`crate::snapshot`]
+    /// and the input encoders in [`crate::key`] / [`crate::mouse`].
     pub(crate) fn as_raw(&self) -> ffi::GhosttyTerminal {
         self.raw
     }
@@ -86,9 +112,21 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // SAFETY: we own the handle uniquely and never touch it after drop.
+        // Free the terminal first so no in-flight callbacks can fire after
+        // the userdata is freed.
         unsafe { ffi::ghostty_terminal_free(self.raw) };
+        if !self.effects.is_null() {
+            // SAFETY: after ghostty_terminal_free, no further callbacks fire;
+            // the box is uniquely ours.
+            unsafe { crate::effects::free_effects(self.effects) };
+        }
     }
+}
+
+/// A render state snapshot of a [`Terminal`]: viewport cells, cursor, colors,
+/// and dirty tracking. Owns the underlying `GhosttyRenderState` handle.
+pub struct RenderState {
+    raw: ffi::GhosttyRenderState,
 }
 
 impl RenderState {
