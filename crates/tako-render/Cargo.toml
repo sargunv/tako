@@ -8,5 +8,17 @@ description = "QQuickItem RHI terminal renderer (cxx-qt-exposed)."
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+# freetype-rs: safe wrapper over system libfreetype (via freetype-sys) for
+# glyph rasterization. rustybuzz: pure-Rust port of HarfBuzz for shaping.
+# Substituted for harfbuzz_rs/harfbuzz-sys because harfbuzz-sys pulls its own
+# freetype-sys, creating an unsatisfiable cargo `links = "freetype"` conflict
+# with freetype-rs. Same shaping engine; revisit if strict system-HarfBuzz
+# linkage becomes a requirement.
+freetype-rs = "0.38"
+png = "0.18"
+rustybuzz = "0.18"
+tako-term = { path = "../tako-term" }
+
 [lints]
 workspace = true

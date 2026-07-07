@@ -9,7 +9,7 @@ with libghostty-vt as the terminal core.
 tako/
 ├── crates/
 │   ├── tako-term/      libghostty-vt bindgen wrapper, PTY bridge, OSC dispatch
-│   ├── tako-render/    QQuickItem RHI terminal renderer (cxx-qt-exposed)
+│   ├── tako-render/    glyph atlas (freetype+rustybuzz) + QQuickItem RHI renderer
 │   ├── tako-model/     Window/Workspace/Split/Pane/Surface/Panel tree
 │   ├── tako-bonsplit/  binary split tree
 │   ├── tako-dbus/      D-Bus server + client (zbus)
@@ -50,6 +50,12 @@ The project uses [mise](https://mise.jdx.dev) to bootstrap the toolchain
 
 Native system libraries (Qt6/KDE Frameworks, freetype, harfbuzz, fontconfig) are
 expected from the host for now; pixi/conda-forge packaging is deferred.
+`tako-render` links system **freetype** via the `freetype-rs` crate; shaping
+uses **rustybuzz** (pure-Rust HarfBuzz port) instead of `harfbuzz_rs` because
+`harfbuzz-sys` pulls its own `freetype-sys`, creating a cargo
+`links =
+"freetype"` conflict. Revisit if strict system-HarfBuzz linkage is
+required.
 
 ## Project invariants
 
