@@ -16,6 +16,9 @@ path = "src/lib.rs"
 # with freetype-rs. Same shaping engine; revisit if strict system-HarfBuzz
 # linkage becomes a requirement.
 freetype-rs = "0.38"
+# glow: thin GL binding used by the QQuickFramebufferObject renderer. Function
+# pointers are resolved through Qt's QOpenGLContext::getProcAddress loader.
+glow = "0.17"
 png = "0.18"
 rustybuzz = "0.18"
 tako-term = { path = "../tako-term" }

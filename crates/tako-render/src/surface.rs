@@ -28,81 +28,72 @@ use tako_term::terminal::{RenderState, Terminal};
 use crate::atlas::GlyphAtlas;
 use crate::font::{CellMetrics, FontFace, GlyphBitmap, ShapedGlyph};
 
-/// One textured quad: destination rect + atlas UV rect + modulate color.
+/// One vertex of a textured quad: pixel-space position, atlas UV, and a
+/// modulate color. The renderer uploads these verbatim into a VBO and draws
+/// with a single shader that multiplies the atlas coverage by the color.
+///
+/// Layout (20 bytes, matched in `gl_renderer.rs`'s vertex-attrib setup):
+/// `{ x: f32, y: f32, u: f32, v: f32, r/g/b/a: u8 }`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct CQuad {
+pub struct Vertex {
     pub x: f32,
     pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub u0: f32,
-    pub v0: f32,
-    pub u1: f32,
-    pub v1: f32,
+    pub u: f32,
+    pub v: f32,
     pub r: u8,
     pub g: u8,
     pub b: u8,
     pub a: u8,
 }
 
-/// A flat-colored rect (background or cursor). `a == 0` means "skip".
-#[repr(C)]
-#[derive(Clone, Copy, Default)]
-pub struct CRect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
-}
-
-/// The frame plan handed to the C++ renderer each tick. All pointers are
+/// The render plan handed to the GL renderer each tick. All pointers are
 /// borrowed from the [`Surface`] and valid only until the next
-/// [`Surface::tick`] (or the surface's destruction).
+/// [`Surface::tick`] (or the surface's destruction); the renderer deep-copies
+/// them in its `synchronize()` step.
+///
+/// `vertices` is one flat buffer of glyph + cursor quad vertices in draw order
+/// (cursor last, so it layers over glyphs). Background-cell quads land in P2.
 #[repr(C)]
 pub struct FramePlan {
-    /// Full-area background rect (`a == 0` to skip).
-    pub bg: CRect,
-    /// Cursor rect (`a == 0` if invisible).
-    pub cursor: CRect,
-    /// Default foreground color (used by the renderer to tint monochrome text).
-    pub fg_default: [u8; 4],
+    /// FBO clear color (terminal default background).
+    pub clear_color: [u8; 4],
     pub cell_w: f32,
     pub cell_h: f32,
     pub cols: u32,
     pub rows: u32,
-    pub quads: *const CQuad,
-    pub quad_count: usize,
+    pub vertices: *const Vertex,
+    pub vertex_count: usize,
     pub atlas_w: u32,
     pub atlas_h: u32,
     /// Grayscale atlas pixels (`atlas_w * atlas_h` bytes).
     pub atlas_pixels: *const u8,
     /// Bumped whenever the atlas is rebuilt, even if dimensions are unchanged
-    /// (shelf-pack reuses space within the same canvas). The renderer must
-    /// re-upload the texture whenever this changes.
+    /// (shelf-pack reuses space within the same canvas). The renderer
+    /// re-uploads the texture whenever this changes.
     pub atlas_generation: u64,
+    /// UV of the permanent white texel at atlas pixel (0, 0). Flat-color quads
+    /// (background, cursor) sample here for full coverage.
+    pub white_u: f32,
+    pub white_v: f32,
 }
 
 impl Default for FramePlan {
     fn default() -> Self {
         Self {
-            bg: CRect::default(),
-            cursor: CRect::default(),
-            fg_default: [0; 4],
+            clear_color: [0; 4],
             cell_w: 0.0,
             cell_h: 0.0,
             cols: 0,
             rows: 0,
-            quads: ptr::null(),
-            quad_count: 0,
+            vertices: ptr::null(),
+            vertex_count: 0,
             atlas_w: 0,
             atlas_h: 0,
             atlas_pixels: ptr::null(),
             atlas_generation: 0,
+            white_u: 0.0,
+            white_v: 0.0,
         }
     }
 }
@@ -130,12 +121,17 @@ pub struct Surface {
     /// Bumped every time `atlas` is reassigned, so the renderer can detect
     /// content changes that don't alter dimensions (shelf-pack repacking).
     atlas_generation: u64,
+    /// UV of the permanent white texel at atlas pixel (0, 0). Flat-color quads
+    /// (background, cursor) sample here for full coverage. Recomputed on each
+    /// atlas rebuild because dimensions (and thus the UV) can change.
+    white_u: f32,
+    white_v: f32,
     glyph_advance: HashMap<u32, f32>,
     /// Rasterize-once cache keyed by glyph id, shared across atlas rebuilds so
     /// FreeType never rasterizes the same glyph twice.
     raster_cache: HashMap<u32, GlyphBitmap>,
     shape_cache: HashMap<String, Vec<ShapedGlyph>>,
-    quads_buf: Vec<CQuad>,
+    vertex_buf: Vec<Vertex>,
     autorun: Option<Autorun>,
 }
 
@@ -188,10 +184,12 @@ impl Surface {
             rows,
             atlas,
             atlas_generation: 0,
+            white_u: 0.0,
+            white_v: 0.0,
             glyph_advance: HashMap::new(),
             raster_cache,
             shape_cache: HashMap::new(),
-            quads_buf: Vec::new(),
+            vertex_buf: Vec::new(),
             autorun,
         })
     }
@@ -246,12 +244,12 @@ impl Surface {
         // Both are signals that something is bound to output volume.
         if total_us > 5_000 || byte_count > 4_096 {
             eprintln!(
-                "[tick] total={total_us}µs bytes={byte_count} drain={}µs vt={}µs snap={}µs plan={}µs quads={}",
+                "[tick] total={total_us}µs bytes={byte_count} drain={}µs vt={}µs snap={}µs plan={}µs verts={}",
                 t_drain.duration_since(t0).as_micros(),
                 t_vt.duration_since(t_drain).as_micros(),
                 t_snap.duration_since(t_vt).as_micros(),
                 t_plan.duration_since(t_snap).as_micros(),
-                plan.quad_count,
+                plan.vertex_count,
             );
         }
 
@@ -301,6 +299,19 @@ impl Surface {
             self.atlas =
                 GlyphAtlas::from_glyph_advances(&self.font, &advance, &mut self.raster_cache);
             self.atlas_generation = self.atlas_generation.wrapping_add(1);
+            // Recompute the white-texel UV: the texel lives at pixel (0, 0);
+            // sample at the pixel center (0.5 / dims) to avoid bleeding into
+            // neighbors under bilinear filtering.
+            self.white_u = if self.atlas.width > 0 {
+                0.5 / self.atlas.width as f32
+            } else {
+                0.0
+            };
+            self.white_v = if self.atlas.height > 0 {
+                0.5 / self.atlas.height as f32
+            } else {
+                0.0
+            };
         }
         self.glyph_advance = advance;
         let t_shape = Instant::now();
@@ -319,7 +330,64 @@ impl Surface {
         };
 
         let fg_default = snap.colors.foreground;
-        let mut quads: Vec<CQuad> = Vec::new();
+        let mut verts: Vec<Vertex> = Vec::new();
+
+        // Push a textured quad (two triangles, 4 vertices) in pixel space.
+        // `push_quad` is inlined-hot; keep attribute order identical to the
+        // GL vertex-attrib layout in `gl_renderer.rs`.
+        let mut push_quad = |x: f32,
+                             y: f32,
+                             w: f32,
+                             h: f32,
+                             u0: f32,
+                             v0: f32,
+                             u1: f32,
+                             v1: f32,
+                             (r, g, b): (u8, u8, u8)| {
+            let a = 255u8;
+            // Counter-clockwise wound (matches the index pattern in the GL
+            // renderer: 0,1,2, 0,2,3).
+            verts.push(Vertex {
+                x,
+                y,
+                u: u0,
+                v: v0,
+                r,
+                g,
+                b,
+                a,
+            }); // top-left
+            verts.push(Vertex {
+                x: x + w,
+                y,
+                u: u1,
+                v: v0,
+                r,
+                g,
+                b,
+                a,
+            }); // top-right
+            verts.push(Vertex {
+                x: x + w,
+                y: y + h,
+                u: u1,
+                v: v1,
+                r,
+                g,
+                b,
+                a,
+            }); // br
+            verts.push(Vertex {
+                x,
+                y: y + h,
+                u: u0,
+                v: v1,
+                r,
+                g,
+                b,
+                a,
+            }); // bl
+        };
 
         for (row_i, row) in snap.rows_data.iter().enumerate() {
             let row_y = row_i as f32 * ch;
@@ -328,7 +396,7 @@ impl Surface {
                 if cell.grapheme.is_empty() {
                     continue;
                 }
-                let (cr, cg, cb) = match cell.fg {
+                let fg = match cell.fg {
                     Some(c) => (c.r, c.g, c.b),
                     None => (fg_default.r, fg_default.g, fg_default.b),
                 };
@@ -339,72 +407,81 @@ impl Surface {
                     .unwrap_or_default();
                 let mut pen_x = col_i as f32 * cw;
                 for sg in shaped {
-                    if let Some(rect) = self.atlas.glyphs.get(&sg.glyph_id) {
+                    if let Some(rect) = self.atlas.glyphs.get(&sg.glyph_id)
+                        && rect.w > 0
+                        && rect.h > 0
+                    {
                         let qx = pen_x + rect.left_bearing as f32;
                         let qy = baseline - rect.top_bearing as f32;
-                        if rect.w > 0 && rect.h > 0 {
-                            quads.push(CQuad {
-                                x: qx,
-                                y: qy,
-                                w: rect.w as f32,
-                                h: rect.h as f32,
-                                u0: rect.x as f32 * inv_w,
-                                v0: rect.y as f32 * inv_h,
-                                u1: (rect.x + rect.w) as f32 * inv_w,
-                                v1: (rect.y + rect.h) as f32 * inv_h,
-                                r: cr,
-                                g: cg,
-                                b: cb,
-                                a: 255,
-                            });
-                        }
-                        pen_x += sg.x_advance;
+                        push_quad(
+                            qx,
+                            qy,
+                            rect.w as f32,
+                            rect.h as f32,
+                            rect.x as f32 * inv_w,
+                            rect.y as f32 * inv_h,
+                            (rect.x + rect.w) as f32 * inv_w,
+                            (rect.y + rect.h) as f32 * inv_h,
+                            fg,
+                        );
                     }
+                    pen_x += sg.x_advance;
                 }
             }
         }
 
-        self.quads_buf = quads;
+        // Cursor: drawn last so it layers on top of any glyph beneath it.
+        // Samples the white texel for full coverage → a flat-color quad.
+        if let Some((cx, cy)) = snap.cursor.viewport
+            && snap.cursor.visible
+        {
+            let color = snap.colors.cursor.unwrap_or(snap.colors.foreground);
+            push_quad(
+                cx as f32 * cw,
+                cy as f32 * ch,
+                cw,
+                ch,
+                self.white_u,
+                self.white_v,
+                self.white_u,
+                self.white_v,
+                (color.r, color.g, color.b),
+            );
+        }
+
+        self.vertex_buf = verts;
         let t_quads = Instant::now();
 
         let build_total_us = t_quads.duration_since(t0).as_micros();
         if build_total_us > 5_000 {
             eprintln!(
-                "[build_plan] total={build_total_us}µs unique={}µs (n={unique_count}) shape={}µs (atlas_rebuilt={atlas_rebuilt}, advance_n={}, raster_cache_n={}) quads={}µs (n={})",
+                "[build_plan] total={build_total_us}µs unique={}µs (n={unique_count}) shape={}µs (atlas_rebuilt={atlas_rebuilt}, advance_n={}, raster_cache_n={}) verts={}µs (n={})",
                 t_unique.duration_since(t0).as_micros(),
                 t_shape.duration_since(t_unique).as_micros(),
                 self.glyph_advance.len(),
                 self.raster_cache.len(),
                 t_quads.duration_since(t_shape).as_micros(),
-                self.quads_buf.len(),
+                self.vertex_buf.len(),
             );
         }
 
-        // Background: full area, terminal bg color.
-        let bg = CRect {
-            x: 0.0,
-            y: 0.0,
-            w: self.cols as f32 * cw,
-            h: self.rows as f32 * ch,
-            r: snap.colors.background.r,
-            g: snap.colors.background.g,
-            b: snap.colors.background.b,
-            a: 255,
-        };
-
-        // Cursor.
-        let cursor = self.build_cursor(snap, cw, ch);
-
         FramePlan {
-            bg,
-            cursor,
-            fg_default: [fg_default.r, fg_default.g, fg_default.b, 255],
+            clear_color: [
+                snap.colors.background.r,
+                snap.colors.background.g,
+                snap.colors.background.b,
+                255,
+            ],
             cell_w: cw,
             cell_h: ch,
             cols: self.cols as u32,
             rows: self.rows as u32,
-            quads: self.quads_buf.as_ptr(),
-            quad_count: self.quads_buf.len(),
+            vertices: if self.vertex_buf.is_empty() {
+                ptr::null()
+            } else {
+                self.vertex_buf.as_ptr()
+            },
+            vertex_count: self.vertex_buf.len(),
             atlas_w,
             atlas_h,
             atlas_pixels: if atlas_w * atlas_h > 0 {
@@ -413,26 +490,8 @@ impl Surface {
                 ptr::null()
             },
             atlas_generation: self.atlas_generation,
-        }
-    }
-
-    fn build_cursor(&self, snap: &FrameSnapshot, cw: f32, ch: f32) -> CRect {
-        let Some((cx, cy)) = snap.cursor.viewport else {
-            return CRect::default();
-        };
-        if !snap.cursor.visible {
-            return CRect::default();
-        }
-        let color = snap.colors.cursor.unwrap_or(snap.colors.foreground);
-        CRect {
-            x: cx as f32 * cw,
-            y: cy as f32 * ch,
-            w: cw,
-            h: ch,
-            r: color.r,
-            g: color.g,
-            b: color.b,
-            a: 255,
+            white_u: self.white_u,
+            white_v: self.white_v,
         }
     }
 }

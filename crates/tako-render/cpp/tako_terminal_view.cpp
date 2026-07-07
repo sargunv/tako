@@ -1,306 +1,124 @@
-// TakoTerminalView implementation. See the header for the design.
+// TakoTerminalView + TakoTerminalRenderer implementation. See the header.
 //
-// The C ABI surface (tako_render::surface) is declared here and matched
-// field-for-field against the Rust `#[repr(C)]` types.
+// Two C ABI surfaces are consumed here:
+//   - tako_render::surface — Surface lifecycle + tick (produces a FramePlan).
+//   - tako_render::gl_renderer — GlRenderer lifecycle + GL draws.
+//
+// Threading model:
+//   - TakoTerminalView lives on the GUI thread. Its QTimer calls
+//     tako_surface_tick to refresh m_plan, then QQuickItem::update() to
+//     schedule a render.
+//   - TakoTerminalRenderer::synchronize (GUI thread) copies the latest plan
+//     into the GlRenderer's staging. The framework serializes synchronize
+//     with render().
+//   - TakoTerminalRenderer::render (render thread) lazily attaches the
+//     GlRenderer to Qt's current GL context (via a getProcAddress loader
+//     bridge) and issues the draw.
 
 #include "tako_terminal_view.h"
 
-#include <QColor>
-#include <QImage>
+#include <QGuiApplication>
 #include <QKeyEvent>
 #include <QMouseEvent>
-#include <QQmlEngine>
+#include <QOpenGLContext>
 #include <QQuickWindow>
-#include <QSGFlatColorMaterial>
-#include <QSGGeometry>
-#include <QSGGeometryNode>
-#include <QSGTexture>
-#include <QSGTextureMaterial>
-#include <QSGTransformNode>
+#include <QScreen>
 #include <QTimer>
-#include <QtQuick/qsgnode.h>
+#include <QtQuick/qquickwindow.h>
 
 #include <chrono>
 #include <cstdio>
 
-// ---- C ABI into the Rust `tako_render::surface` module ----
+// ---- C ABI into the Rust `tako_render` crate ----
 
 extern "C" {
-struct TakoCQuad {
-    float x, y, w, h;
-    float u0, v0, u1, v1;
-    uint8_t r, g, b, a;
-};
-struct TakoCRect {
-    float x, y, w, h;
-    uint8_t r, g, b, a;
-};
-struct TakoFramePlan {
-    TakoCRect bg;
-    TakoCRect cursor;
-    uint8_t fg_default[4];
-    float cell_w, cell_h;
-    uint32_t cols, rows;
-    const TakoCQuad *quads;
-    size_t quad_count;
-    uint32_t atlas_w, atlas_h;
-    const uint8_t *atlas_pixels;
-    uint64_t atlas_generation;
-};
-
+// surface.rs
 void *tako_surface_new(uint16_t cols, uint16_t rows, const char *font_path,
                        uint32_t pixel_height);
 void tako_surface_destroy(void *surface);
 void tako_surface_tick(void *surface, TakoFramePlan *out);
 void tako_surface_write(void *surface, const uint8_t *data, size_t len);
+
+// gl_renderer.rs
+void *tako_gl_renderer_new();
+void tako_gl_renderer_destroy(void *renderer);
+void tako_gl_renderer_ensure_gl(void *renderer,
+                                const void *(*loader)(const char *, void *),
+                                void *loader_userdata);
+void tako_gl_renderer_ingest_plan(void *renderer, const TakoFramePlan *plan,
+                                  int32_t viewport_w, int32_t viewport_h);
+void tako_gl_renderer_render(void *renderer);
+
+// qml_init.rs
+void tako_register_qml_types();
 }
 
-// Register the TakoTerminalView QQuickItem as `TerminalView` under a dedicated
-// URI. cxx-qt-build's compiled `org.tako` module only registers bridge types,
-// so hand-written C++ items are registered imperatively here. Call once before
-// loading QML.
+// Register TakoTerminalView as `TerminalView` under a dedicated URI. Call once
+// before loading QML (see tako_render::qml_init).
 extern "C" void tako_register_qml_types() {
     qmlRegisterType<TakoTerminalView>("org.tako.terminal", 1, 0, "TerminalView");
 }
 
-namespace {
-// Vertex counts are small (≤ a few thousand); UInt16 indices suffice.
-constexpr int kCellsMax = 1 << 14;
+// ---- glow loader bridge: resolve GL entry points via Qt ----
 
-// Build (or resize) a Point2D geometry for a flat-colored quad.
-QSGGeometry *makePointGeometry() {
-    auto *g = new QSGGeometry(QSGGeometry::defaultAttributes_Point2D(), 4, 6);
-    g->setDrawingMode(QSGGeometry::DrawTriangles);
-    auto *ix = g->indexDataAsUShort();
-    ix[0] = 0;
-    ix[1] = 1;
-    ix[2] = 2;
-    ix[3] = 0;
-    ix[4] = 2;
-    ix[5] = 3;
-    return g;
+namespace {
+const void *qt_gl_loader(const char *name, void *userdata) {
+    auto *ctx = static_cast<QOpenGLContext *>(userdata);
+    if (!ctx) return nullptr;
+    return reinterpret_cast<const void *>(ctx->getProcAddress(name));
 }
 }  // namespace
 
-TakoTerminalView::TakoTerminalView(QQuickItem *parent) : QQuickItem(parent) {
-    setFlag(QQuickItem::ItemHasContents);
-    // Accept left-button clicks so the item can claim active keyboard focus on
-    // click; middle button is reserved for selection paste (TODO phase-1-§5).
+// ---- TakoTerminalView (GUI thread) ----
+
+TakoTerminalView::TakoTerminalView(QQuickItem *parent)
+    : QQuickFramebufferObject(parent) {
+    // Click-to-focus so subsequent key events arrive here. Middle button is
+    // reserved for selection paste (TODO phase-1-§5).
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
     m_timer = new QTimer(this);
     m_timer->setInterval(16);  // ~60 Hz poll for PTY output
-    connect(m_timer, &QTimer::timeout, this, [this] { update(); });
+    connect(m_timer, &QTimer::timeout, this, [this] {
+        if (m_surface) {
+            tako_surface_tick(m_surface, &m_plan);
+        }
+        update();  // schedule a render (synchronize + render on the SG thread)
+    });
     m_timer->start();
 }
 
 TakoTerminalView::~TakoTerminalView() {
-    delete m_atlasTexture;
     if (m_surface) tako_surface_destroy(m_surface);
-}
-
-void TakoTerminalView::itemChange(ItemChange change,
-                                  const ItemChangeData &value) {
-    QQuickItem::itemChange(change, value);
-    if (change == ItemSceneChange && value.window) {
-        // Window is now available for texture creation.
-        update();
-    }
 }
 
 void TakoTerminalView::ensureSurface() {
     if (!m_surface) {
-        // 18px cell height for the spike; cols/rows fixed at 80x24.
+        // 18 px cell height, fixed 80×24 grid for now; resize lands in P3.
         m_surface = tako_surface_new(80, 24, nullptr, 18);
     }
 }
 
-QSGNode *TakoTerminalView::updatePaintNode(QSGNode *oldNode,
-                                           UpdatePaintNodeData *) {
-    const auto t0 = std::chrono::steady_clock::now();
-    ensureSurface();
-    if (!m_surface) return oldNode;
+QQuickFramebufferObject::Renderer *TakoTerminalView::createRenderer() const {
+    const_cast<TakoTerminalView *>(this)->ensureSurface();
+    return new TakoTerminalRenderer();
+}
 
-    TakoFramePlan plan;
-    const auto t_tick_start = std::chrono::steady_clock::now();
-    tako_surface_tick(m_surface, &plan);
-    const auto t_tick_end = std::chrono::steady_clock::now();
-
-    auto *root = static_cast<QSGTransformNode *>(oldNode);
-    if (!root) {
-        root = new QSGTransformNode;
-        // child 0: background, child 1: cursor, child 2: glyphs.
-        auto *bg = new QSGGeometryNode;
-        bg->setGeometry(makePointGeometry());
-        bg->setFlag(QSGNode::OwnsGeometry);
-        bg->setMaterial(new QSGFlatColorMaterial);
-        bg->setFlag(QSGNode::OwnsMaterial);
-        root->appendChildNode(bg);
-
-        auto *cur = new QSGGeometryNode;
-        cur->setGeometry(makePointGeometry());
-        cur->setFlag(QSGNode::OwnsGeometry);
-        cur->setMaterial(new QSGFlatColorMaterial);
-        cur->setFlag(QSGNode::OwnsMaterial);
-        root->appendChildNode(cur);
-
-        auto *gly = new QSGGeometryNode;
-        gly->setGeometry(new QSGGeometry(
-            QSGGeometry::defaultAttributes_TexturedPoint2D(), 0, 0));
-        gly->setFlag(QSGNode::OwnsGeometry);
-        gly->setMaterial(new QSGTextureMaterial);
-        gly->setFlag(QSGNode::OwnsMaterial);
-        root->appendChildNode(gly);
-    }
-
-    auto *bgNode = static_cast<QSGGeometryNode *>(root->childAtIndex(0));
-    auto *cursorNode = static_cast<QSGGeometryNode *>(root->childAtIndex(1));
-    auto *glyphNode = static_cast<QSGGeometryNode *>(root->childAtIndex(2));
-
-    // --- background ---
-    {
-        auto *mat =
-            static_cast<QSGFlatColorMaterial *>(bgNode->material());
-        mat->setColor(
-            QColor(plan.bg.r, plan.bg.g, plan.bg.b, plan.bg.a));
-        auto *pts = bgNode->geometry()->vertexDataAsPoint2D();
-        const float W = float(plan.cols) * plan.cell_w;
-        const float H = float(plan.rows) * plan.cell_h;
-        pts[0].set(0, 0);
-        pts[1].set(W, 0);
-        pts[2].set(W, H);
-        pts[3].set(0, H);
-        bgNode->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
-    }
-
-    // --- atlas texture (rebuild on content change OR dimension change) ---
-    // The atlas pixels, glyph placements, and UVs are all recomputed in Rust
-    // whenever a new glyph id appears. Dimensions may stay the same (shelf-pack
-    // repacks into the existing canvas), so we additionally track a generation
-    // counter bumped on every rebuild; without this, stale glyph placements
-    // corrupt the render once the canvas stabilizes in size.
-    const bool dims_changed =
-        !m_atlasInit || (int)plan.atlas_w != m_atlasW || (int)plan.atlas_h != m_atlasH;
-    bool atlas_texture_rebuilt = false;
-    if (plan.atlas_w && plan.atlas_h &&
-        (plan.atlas_generation != m_atlasGen || dims_changed)) {
-        atlas_texture_rebuilt = true;
-        const auto t_atlas_start = std::chrono::steady_clock::now();
-        delete m_atlasTexture;
-        m_atlasTexture = nullptr;
-
-        // Bake the default fg color into an RGBA texture using the grayscale
-        // atlas as coverage. (Per-cell color needs a custom shader; see header.)
-        QImage img(plan.atlas_w, plan.atlas_h, QImage::Format_RGBA8888);
-        const uint8_t fr = plan.fg_default[0];
-        const uint8_t fg = plan.fg_default[1];
-        const uint8_t fb = plan.fg_default[2];
-        for (uint32_t y = 0; y < plan.atlas_h; ++y) {
-            auto *line = img.scanLine(y);
-            const auto *src = plan.atlas_pixels + y * plan.atlas_w;
-            for (uint32_t x = 0; x < plan.atlas_w; ++x) {
-                const uint8_t cov = src[x];
-                line[x * 4 + 0] = fr;
-                line[x * 4 + 1] = fg;
-                line[x * 4 + 2] = fb;
-                line[x * 4 + 3] = cov;
-            }
-        }
-        m_atlasTexture = window()->createTextureFromImage(img);
-        m_atlasW = (int)plan.atlas_w;
-        m_atlasH = (int)plan.atlas_h;
-        m_atlasGen = plan.atlas_generation;
-        m_atlasInit = true;
-        const auto t_atlas_end = std::chrono::steady_clock::now();
-        const auto atlas_us =
-            std::chrono::duration_cast<std::chrono::microseconds>(t_atlas_end - t_atlas_start)
-                .count();
-        if (atlas_us > 2000) {
-            fprintf(stderr,
-                    "[updatePaintNode] atlas texture rebuild=%lldµs (%ux%u)\n",
-                    (long long)atlas_us, plan.atlas_w, plan.atlas_h);
-        }
-    }
-
-    // --- glyphs ---
-    {
-        const int vcount = int(plan.quad_count) * 4;
-        const int icount = int(plan.quad_count) * 6;
-        QSGGeometry *g = glyphNode->geometry();
-        g->allocate(vcount, icount);
-        g->setDrawingMode(QSGGeometry::DrawTriangles);
-        auto *pts = g->vertexDataAsTexturedPoint2D();
-        auto *ix = g->indexDataAsUShort();
-        for (size_t i = 0; i < plan.quad_count && i < (size_t)kCellsMax; ++i) {
-            const auto &q = plan.quads[i];
-            const float x0 = q.x, y0 = q.y;
-            const float x1 = q.x + q.w, y1 = q.y + q.h;
-            pts[i * 4 + 0].set(x0, y0, q.u0, q.v0);
-            pts[i * 4 + 1].set(x1, y0, q.u1, q.v0);
-            pts[i * 4 + 2].set(x1, y1, q.u1, q.v1);
-            pts[i * 4 + 3].set(x0, y1, q.u0, q.v1);
-            const uint16_t b = uint16_t(i * 4);
-            ix[i * 6 + 0] = b + 0;
-            ix[i * 6 + 1] = b + 1;
-            ix[i * 6 + 2] = b + 2;
-            ix[i * 6 + 3] = b + 0;
-            ix[i * 6 + 4] = b + 2;
-            ix[i * 6 + 5] = b + 3;
-        }
-        auto *mat = static_cast<QSGTextureMaterial *>(glyphNode->material());
-        if (m_atlasTexture) mat->setTexture(m_atlasTexture);
-        glyphNode->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
-    }
-
-    // --- cursor ---
-    {
-        auto *mat =
-            static_cast<QSGFlatColorMaterial *>(cursorNode->material());
-        mat->setColor(
-            QColor(plan.cursor.r, plan.cursor.g, plan.cursor.b, plan.cursor.a));
-        auto *pts = cursorNode->geometry()->vertexDataAsPoint2D();
-        const float cx = plan.cursor.x, cy = plan.cursor.y;
-        const float cw = plan.cursor.w, ch = plan.cursor.h;
-        pts[0].set(cx, cy);
-        pts[1].set(cx + cw, cy);
-        pts[2].set(cx + cw, cy + ch);
-        pts[3].set(cx, cy + ch);
-        cursorNode->markDirty(QSGNode::DirtyGeometry | QSGNode::DirtyMaterial);
-    }
-
-    const auto t_end = std::chrono::steady_clock::now();
-    const auto total_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t0).count();
-    const auto tick_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(t_tick_end - t_tick_start).count();
-    const auto qsg_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(t_end - t_tick_end).count();
-    // Log slow frames: >5ms total OR atlas rebuild OR lots of quads. The
-    // tick-vs-qsg split tells us whether the cost is in the Rust core or in
-    // QSG node building / texture upload.
-    if (total_us > 5000 || atlas_texture_rebuilt || plan.quad_count > 1500) {
-        fprintf(stderr,
-                "[updatePaintNode] total=%lldµs tick=%lldµs qsg=%lldµs "
-                "atlas_rebuilt=%d quads=%zu atlas=%ux%u\n",
-                (long long)total_us, (long long)tick_us, (long long)qsg_us,
-                (int)atlas_texture_rebuilt, (size_t)plan.quad_count, plan.atlas_w,
-                plan.atlas_h);
-    }
-
-    return root;
+void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
+    forceActiveFocus();
+    e->accept();
+    // TODO(phase-1-§5): drag selection (anchor + extent → cell range →
+    // PRIMARY selection), middle-click paste, SGR mouse forwarding.
 }
 
 // ---- keyboard input ----
 //
-// Translate a QKeyEvent into the byte sequence a terminal application expects
-// (ANSI/VT escape sequences for special keys, raw bytes for printable chars,
-// and control codes for Ctrl+letter combos), then write them to the PTY via
-// tako_surface_write. Modified keys (Shift+arrow etc.) currently send the
-// unmodified sequence; full modifier-aware CSI (~ and 1;A-style) sequences are
-// TODO(phase-1-§5) once we wire app-cursor / modifier reporting.
+// Translate QKeyEvent into bytes a terminal expects and feed the PTY. Full
+// modifier-aware CSI / Kitty protocol lands in P5 via libghostty-vt's key
+// encoder; this hand-rolled table is the spike.
 
 void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
     if (!m_surface) {
-        QQuickItem::keyPressEvent(e);
+        QQuickFramebufferObject::keyPressEvent(e);
         return;
     }
 
@@ -311,12 +129,9 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
 
     const bool ctrl = mods & Qt::ControlModifier;
 
-    // Ctrl+A..Z → 0x01..0x1A (terminal control characters, e.g. Ctrl+C = ETX).
     if (ctrl && key >= Qt::Key_A && key <= Qt::Key_Z) {
         bytes.append(static_cast<char>(key - Qt::Key_A + 1));
-    }
-    // Ctrl+[ ] \ → ESC (0x1b), FS (0x1c), GS (0x1d). Ctrl+Space/@ → NUL.
-    else if (ctrl && key == Qt::Key_BracketLeft) {
+    } else if (ctrl && key == Qt::Key_BracketLeft) {
         bytes.append('\x1b');
     } else if (ctrl && key == Qt::Key_Backslash) {
         bytes.append('\x1c');
@@ -331,8 +146,6 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
                 bytes.append('\r');
                 break;
             case Qt::Key_Backspace:
-                // DEL (0x7f) is the conventional terminal backspace; ghostty
-                // and most shells treat ^? as erase-char by default.
                 bytes.append('\x7f');
                 break;
             case Qt::Key_Tab:
@@ -408,12 +221,10 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
                 bytes.append("\x1b[24~");
                 break;
             default:
-                // Printable: forward UTF-8. Text may be empty for unmapped
-                // hardware keys; ignore those rather than spamming the shell.
                 if (!text.isEmpty()) {
                     bytes.append(text.toUtf8());
                 } else {
-                    QQuickItem::keyPressEvent(e);
+                    QQuickFramebufferObject::keyPressEvent(e);
                     return;
                 }
         }
@@ -427,13 +238,35 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
     e->accept();
 }
 
-// ---- mouse ----
+// ---- TakoTerminalRenderer (render thread) ----
 //
-// For now a click only claims active focus so that subsequent key events are
-// delivered to this item. Drag selection, middle-click paste, and SGR mouse
-// reporting land in phase-1-§5.
+// A thin shell around the Rust GlRenderer. C++ only does two things the Rust
+// side can't: (1) provide the glow GL loader bridge via QOpenGLContext, and
+// (2) compute the physical-pixel viewport from the item's logical size × DPR.
 
-void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
-    forceActiveFocus();
-    e->accept();
+TakoTerminalRenderer::TakoTerminalRenderer() : m_gl(tako_gl_renderer_new()) {}
+
+TakoTerminalRenderer::~TakoTerminalRenderer() {
+    if (m_gl) tako_gl_renderer_destroy(m_gl);
+}
+
+void TakoTerminalRenderer::synchronize(QQuickFramebufferObject *item) {
+    auto *view = static_cast<TakoTerminalView *>(item);
+    // Physical-pixel viewport: item logical size × window DPR. The FBO Qt
+    // creates for us is sized in physical pixels (textureFollowsItemSize).
+    const QSizeF logical = view->size();
+    const qreal dpr = view->window() ? view->window()->devicePixelRatio() : 1.0;
+    const int vw = static_cast<int>(logical.width() * dpr);
+    const int vh = static_cast<int>(logical.height() * dpr);
+    tako_gl_renderer_ingest_plan(m_gl, &view->plan(), vw, vh);
+}
+
+void TakoTerminalRenderer::render() {
+    // Lazy GL init: glow needs QOpenGLContext::currentContext() to resolve
+    // function pointers, which is only valid here on the render thread.
+    if (!m_glInited) {
+        tako_gl_renderer_ensure_gl(m_gl, qt_gl_loader, QOpenGLContext::currentContext());
+        m_glInited = true;
+    }
+    tako_gl_renderer_render(m_gl);
 }
