@@ -81,6 +81,18 @@ impl GlyphAtlas {
         Self::pack(face, bitmaps, advance)
     }
 
+    /// Build an atlas from a pre-shaped glyph-id → advance map. Lets the caller
+    /// cache shaping across frames (rustybuzz re-parses the font per `shape`).
+    pub fn from_glyph_advances(face: &FontFace, advance: &HashMap<u32, f32>) -> Self {
+        let mut bitmaps: HashMap<u32, GlyphBitmap> = HashMap::new();
+        for &gid in advance.keys() {
+            if let Ok(bm) = face.rasterize(gid) {
+                bitmaps.insert(gid, bm);
+            }
+        }
+        Self::pack(face, bitmaps, advance.clone())
+    }
+
     fn pack(
         face: &FontFace,
         bitmaps: HashMap<u32, GlyphBitmap>,

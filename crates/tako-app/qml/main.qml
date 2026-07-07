@@ -4,48 +4,28 @@ import QtQuick.Layouts
 import QtQuick.Window
 
 import org.tako
+import org.tako.terminal 1.0
 
 ApplicationWindow {
     id: root
-    width: 480
-    height: 240
+    width: 900
+    height: 480
     visible: true
-    title: qsTr("Tako — Phase 0 spike")
+    title: qsTr("Tako — Phase 0 §3 terminal spike")
     color: palette.window
 
-    ColumnLayout {
+    // The live libghostty-vt terminal. Spawns $SHELL on a PTY and renders via
+    // QSG. Input/resize arrive in Step D; for now this proves the render path.
+    TerminalView {
         anchors.fill: parent
-        anchors.margins: 16
-        spacing: 12
-
-        Label {
-            text: qsTr("Who to greet?")
-            color: palette.text
-        }
-
-        TextField {
-            id: nameField
-            Layout.fillWidth: true
-            placeholderText: qsTr("name")
-            text: qsTr("world")
-            onAccepted: greetButton.clicked()
-        }
-
-        Button {
-            id: greetButton
-            text: qsTr("Greet")
-            onClicked: root.greeting.greet(nameField.text)
-        }
-
-        Label {
-            text: root.greeting.message
-            color: palette.text
-            wrapMode: Text.Wrap
-            Layout.fillWidth: true
-        }
     }
 
-    readonly property Greeting greeting: Greeting {
-        message: qsTr("Hello! — from Rust")
+    Label {
+        text: qsTr("Phase 0 §3: monochrome QSG render of libghostty-vt — input in Step D")
+        color: palette.text
+        anchors.bottom: parent.bottom
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.margins: 6
     }
 }
+

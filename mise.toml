@@ -16,6 +16,10 @@ run = "hk check --all"
 [tasks.fix]
 run = "hk fix --all"
 
+[tasks.tako]
+description = "Build and launch the Tako window (Phase 0 spike). Needs an active graphical session."
+run = "cargo run -p tako-app"
+
 [env]
 # cxx-qt-build discovers Qt via `qmake` on PATH; pin the major version so the
 # Qt6 qmake wins over any lingering Qt5.

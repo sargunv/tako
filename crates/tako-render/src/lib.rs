@@ -9,6 +9,9 @@
 
 pub mod atlas;
 pub mod font;
+pub mod qml_init;
+pub mod surface;
 
 pub use atlas::{GlyphAtlas, GlyphRect};
 pub use font::{CellMetrics, FontError, FontFace, GlyphBitmap, ShapedGlyph};
+pub use surface::{CQuad, CRect, FramePlan, Surface};

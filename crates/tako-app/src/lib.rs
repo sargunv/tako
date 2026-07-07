@@ -4,6 +4,10 @@
 
 pub mod qobject;
 
+// Pull in tako-render so its extern "C" surface symbols (tako_surface_*) are
+// linked into the final binary for the C++ TakoTerminalView to call.
+use tako_render as _;
+
 use cxx_qt::casting::Upcast;
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QUrl};
 use std::pin::Pin;
@@ -12,6 +16,10 @@ use std::pin::Pin;
 /// event loop. This is the Phase 0 §1 smoke test — one QML window calling into
 /// Rust.
 pub fn run() {
+    // Register hand-written C++ QQuickItem types (TakoTerminalView) before
+    // loading QML.
+    tako_render::qml_init::register_qml_types();
+
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
 

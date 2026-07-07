@@ -39,9 +39,9 @@ The project uses [mise](https://mise.jdx.dev) to bootstrap the toolchain
 - `mise install` — install pinned toolchain.
 - `mise run check` — run `hk check --all` (dprint check + cargo clippy).
 - `mise run fix` — run `hk fix --all` (dprint fmt + cargo clippy --fix).
+- `timeout 5 mise run tako` — run `tako` with a 5-second timeout to
+  automatically terminate the gui app.
 - `cargo build` / `cargo test` — usual Rust workspace commands.
-- `cargo run -p tako-app` — launch the Tako window (Phase 0 spike). Requires Qt6
-  `-devel` packages on the host and an active Plasma/ graphical session.
 
 `tako-term`'s first build fetches the pinned ghostty tarball (~37 MB) and runs
 `zig build -Demit-lib-vt` (several minutes). The result is cached under
@@ -74,3 +74,12 @@ required.
   (v1.3.1) lacks these — they landed upstream on `main` after v1.3.1. Tako pins
   an upstream `main` commit in `crates/tako-term/build.rs`; bump it deliberately
   and re-verify the bindgen surface.
+- **cxx-qt-build does not register hand-written C++ `QML_ELEMENT` classes.** Its
+  compiled `org.tako` QML module only registers types generated from the cxx-qt
+  bridge (`#[qml_element]`). A C++ `QQuickItem` subclass added via
+  `CxxQtBuilder::cpp_file` must register itself imperatively with
+  `qmlRegisterType<T>("org.tako.<sub>", ...)` under a **separate** URI (the
+  compiled module's qmldir takes precedence over same-URI imperative
+  registrations). The registration C ABI lives in the C++ file; the safe Rust
+  wrapper is `tako_render::qml_init::register_qml_types()`, called from
+  `tako_app::run()` before `engine.load`.
