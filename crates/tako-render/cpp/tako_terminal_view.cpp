@@ -102,6 +102,10 @@ void TakoTerminalView::pumpAndRender() {
         flushHostTitle();
         update();
     }
+    if (!m_exited && tako_surface_exited(m_surface)) {
+        m_exited = true;
+        emit exited();
+    }
 }
 
 float TakoTerminalView::windowDpr() const {

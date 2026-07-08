@@ -278,6 +278,13 @@ impl Surface {
         self.panel.notify_fd()
     }
 
+    /// `true` once the hosted PTY session has exited. The GUI/embedder decides
+    /// whether that means closing this view, showing a restart affordance, or
+    /// quitting the application.
+    pub fn is_exited(&self) -> bool {
+        self.panel.is_exited()
+    }
+
     /// Clear pending readiness-wake bytes (call when the embedder's notifier
     /// fires, before [`Self::tick`]).
     pub fn drain_notify(&self) {

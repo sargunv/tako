@@ -20,5 +20,6 @@ ApplicationWindow {
         anchors.fill: parent
         focus: true
         Component.onCompleted: term.forceActiveFocus()
+        onExited: Qt.quit()
     }
 }

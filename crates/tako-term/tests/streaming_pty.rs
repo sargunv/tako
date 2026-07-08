@@ -23,3 +23,19 @@ fn streaming_pty_drains_output() {
         text.chars().take(200).collect::<String>()
     );
 }
+
+#[test]
+fn streaming_pty_reports_exit_after_child_eof() {
+    let mut pty = StreamingPty::spawn_program(80, 24, "/bin/sh").expect("spawn");
+    pty.write(b"exit\n").unwrap();
+
+    for _ in 0..25 {
+        if pty.is_exited() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(40));
+        let _ = pty.drain();
+    }
+
+    assert!(pty.is_exited(), "PTY did not report child exit");
+}

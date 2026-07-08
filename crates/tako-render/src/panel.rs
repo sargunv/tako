@@ -293,6 +293,12 @@ impl TerminalPanel {
         self.pty.notify_fd()
     }
 
+    /// `true` once the PTY session has exited. The embedder owns the policy for
+    /// what to do next (close tab, quit app, show restart UI, etc.).
+    pub fn is_exited(&self) -> bool {
+        self.pty.is_exited()
+    }
+
     /// Clear pending readiness-wake bytes. Non-blocking; call when the
     /// notifier fires, before [`Self::pump`].
     pub fn drain_notify(&self) {

@@ -7,6 +7,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -38,6 +39,7 @@ pub struct StreamingPty {
     /// Held for the lifetime of the session so the master fd stays open.
     master: Box<dyn MasterPty + Send>,
     pending: Arc<Mutex<Vec<u8>>>,
+    exited: Arc<AtomicBool>,
     reader: Option<thread::JoinHandle<()>>,
     /// Read end of the readiness pipe, handed to the embedder's event loop.
     notify_read: Option<OwnedFd>,
@@ -113,12 +115,17 @@ impl StreamingPty {
 
         let pending = Arc::new(Mutex::new(Vec::<u8>::new()));
         let pending_for_thread = Arc::clone(&pending);
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_for_thread = Arc::clone(&exited);
         let reader_handle = thread::spawn(move || {
             let mut reader = reader;
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        exited_for_thread.store(true, Ordering::Release);
+                        break;
+                    }
                     Ok(n) => {
                         if let Ok(mut g) = pending_for_thread.lock() {
                             g.extend_from_slice(&buf[..n]);
@@ -141,6 +148,7 @@ impl StreamingPty {
             child,
             master: pair.master,
             pending,
+            exited,
             reader: Some(reader_handle),
             notify_read,
             notify_write,
@@ -158,9 +166,22 @@ impl StreamingPty {
 
     /// Send bytes (typed input) to the child's stdin.
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
+        if let Err(e) = self.writer.write_all(bytes) {
+            self.exited.store(true, Ordering::Release);
+            return Err(e);
+        }
+        if let Err(e) = self.writer.flush() {
+            self.exited.store(true, Ordering::Release);
+            return Err(e);
+        }
         Ok(())
+    }
+
+    /// `true` once the PTY reader observed EOF/error or a write failed. This is
+    /// the session-lifetime signal embedders use to decide whether to close the
+    /// hosting surface/window.
+    pub fn is_exited(&self) -> bool {
+        self.exited.load(Ordering::Acquire)
     }
 
     /// Resize the PTY window to the given grid size. Idempotent; safe to call

@@ -124,6 +124,21 @@ pub unsafe extern "C" fn tako_surface_notify_fd(s: *mut Surface) -> i32 {
     surface.notify_fd().unwrap_or(-1)
 }
 
+/// Returns 1 once the PTY session has exited, 0 while it is still alive.
+/// Embedders own policy: close a tab, restart the session, or quit the app.
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_exited(s: *mut Surface) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    // SAFETY: checked non-null above; shared borrow only, no mutation.
+    let surface = unsafe { &*s };
+    i32::from(surface.is_exited())
+}
+
 /// Drain pending readiness-wake bytes from the pipe. Non-blocking; call when
 /// the notifier fires, before [`tako_surface_tick`].
 ///

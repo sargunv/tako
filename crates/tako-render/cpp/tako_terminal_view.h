@@ -39,6 +39,11 @@ public:
     // tick). Called by TakoTerminalRenderer::synchronize on the GUI thread.
     const FramePlan &plan() const { return m_plan; }
 
+signals:
+    // Emitted once when the hosted PTY session exits. Embedders decide whether
+    // to close this view, show restart UI, or quit the application.
+    void exited();
+
 protected:
     // Keyboard: translate QKeyEvent to GhosttyKey + mods and forward via the
     // libghostty-vt key encoder (which honors DEC modes / Kitty protocol).
@@ -81,6 +86,7 @@ private:
     QSocketNotifier *m_notifier = nullptr;
     FramePlan m_plan = {};
     bool m_dprSignalConnected = false;
+    bool m_exited = false;
     // Tracks whether any mouse button is held, for any-event motion reporting.
     bool m_anyMouseButtonHeld = false;
 };
