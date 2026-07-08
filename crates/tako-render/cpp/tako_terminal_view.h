@@ -1,12 +1,12 @@
 // TakoTerminalView: a QQuickFramebufferObject hosting a live libghostty-vt
-// terminal. Owns the Rust `Surface` on the GUI thread (driven by a 16 ms
-// QTimer); the render-thread `TakoTerminalRenderer` draws via glow into the
-// Qt-provided FBO. See the .cpp for the design and the glow loader bridge.
+// terminal. Owns the Rust `Surface` on the GUI thread (woken by a
+// QSocketNotifier on the readiness pipe, plus a safety timer); the
+// render-thread `TakoTerminalRenderer` draws via glow into the Qt-provided FBO.
+// See the .cpp for the design and the glow loader bridge.
 //
-// C ABI surface (tako_render::{surface, gl_renderer}): the item ticks the
-// Surface and stores the latest FramePlan; the Renderer::synchronize (GUI
-// thread) deep-copies it into the GlRenderer's staging; Renderer::render
-// (render thread) issues the GL draws.
+// The FramePlan layout, the Surface/GlRenderer opaque handles, and the C ABI
+// the C++ calls all live in the cbindgen-generated `tako_render.h` — there is
+// no hand-mirrored struct here.
 
 #pragma once
 
@@ -15,24 +15,14 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "tako_render.h"  // FramePlan, Surface, GlRenderer, LoaderFn, C ABI decls
+
 class QKeyEvent;
 class QMouseEvent;
 class QWheelEvent;
 class QFocusEvent;
 class QTimer;
-
-// C-layout mirror of `tako_render::surface::FramePlan`. Field-for-field
-// identical; bump in lockstep with the Rust definition.
-struct TakoFramePlan {
-    uint8_t clear_color[4];
-    float cell_w, cell_h;
-    uint32_t cols, rows;
-    const void *vertices;  // *const Vertex (Rust); opaque to C++
-    size_t vertex_count;
-    uint32_t atlas_w, atlas_h;
-    const uint8_t *atlas_pixels;
-    uint64_t atlas_generation;
-};
+class QSocketNotifier;
 
 class TakoTerminalRenderer;
 
@@ -46,9 +36,8 @@ public:
     QQuickFramebufferObject::Renderer *createRenderer() const override;
 
     // Latest FramePlan (borrowed from the Surface; valid until the next
-    // timer tick). Called by TakoTerminalRenderer::synchronize on the GUI
-    // thread.
-    const TakoFramePlan &plan() const { return m_plan; }
+    // tick). Called by TakoTerminalRenderer::synchronize on the GUI thread.
+    const FramePlan &plan() const { return m_plan; }
 
 protected:
     // Keyboard: translate QKeyEvent to GhosttyKey + mods and forward via the
@@ -82,10 +71,15 @@ private:
     void onDprChanged();
     // Pull a fresh title (if any) from the surface and emit windowTitleChanged.
     void flushHostTitle();
+    // Drain the readiness pipe + tick the surface; `update()` only if it
+    // produced a new frame. Driven by both the wake notifier and the safety
+    // timer.
+    void pumpAndRender();
 
-    void *m_surface = nullptr;  // Surface* from tako_surface_new (opaque)
+    Surface *m_surface = nullptr;  // owned; freed via tako_surface_destroy
     QTimer *m_timer = nullptr;
-    TakoFramePlan m_plan = {};
+    QSocketNotifier *m_notifier = nullptr;
+    FramePlan m_plan = {};
     bool m_dprSignalConnected = false;
     // Tracks whether any mouse button is held, for any-event motion reporting.
     bool m_anyMouseButtonHeld = false;
@@ -103,6 +97,6 @@ public:
     void render() override;
 
 private:
-    void *m_gl = nullptr;  // GlRenderer* from tako_gl_renderer_new (opaque)
+    GlRenderer *m_gl = nullptr;  // owned; freed via tako_gl_renderer_destroy
     bool m_glInited = false;
 };

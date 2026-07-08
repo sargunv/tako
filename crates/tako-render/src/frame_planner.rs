@@ -53,7 +53,7 @@ pub struct Vertex {
 /// (cursor last, so it layers over glyphs). Background-cell quads use the
 /// sentinel [`FLAT_UV`].
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct FramePlan {
     /// FBO clear color (terminal default background).
     pub clear_color: [u8; 4],

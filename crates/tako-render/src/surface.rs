@@ -13,6 +13,7 @@ use tako_term::input as vt_input;
 use tako_term::key::{KeyEncoder, KeyEvent};
 use tako_term::modes;
 use tako_term::mouse::{MouseEncoder, MouseEvent};
+use tako_term::snapshot::Dirty;
 
 use crate::Error;
 use crate::font::CellMetrics;
@@ -33,6 +34,11 @@ pub struct Surface {
     autorun: Option<Autorun>,
     /// Device pixel ratio the font was rasterized for.
     dpr: f32,
+    /// Last frame plan, returned unchanged on idle ticks so the C++ side can
+    /// skip `update()` (no GPU work) when nothing changed. Its borrowed
+    /// pointers stay valid as long as the planner doesn't rebuild — which only
+    /// happens on a non-idle tick.
+    last_plan: FramePlan,
 }
 
 /// Optional one-shot command injected into the PTY shortly after spawn. Driven
@@ -72,6 +78,7 @@ impl Surface {
             mouse_event: MouseEvent::new()?,
             autorun: build_autorun(),
             dpr,
+            last_plan: FramePlan::default(),
         })
     }
 
@@ -221,8 +228,24 @@ impl Surface {
         self.panel.take_host_title()
     }
 
-    /// Drain PTY output, advance the terminal, and rebuild the frame plan.
-    pub fn tick(&mut self) -> FramePlan {
+    /// Raw fd that becomes readable when PTY output is pending. `None` (as
+    /// `-1` via the C ABI) if the readiness pipe couldn't be created.
+    pub fn notify_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.panel.notify_fd()
+    }
+
+    /// Clear pending readiness-wake bytes (call when the embedder's notifier
+    /// fires, before [`Self::tick`]).
+    pub fn drain_notify(&self) {
+        self.panel.drain_notify();
+    }
+
+    /// Drain PTY output, advance the terminal, and rebuild the frame plan if
+    /// anything changed. Returns the plan and a flag that's `true` when the
+    /// plan was actually rebuilt (the embedder should `update()` / re-render)
+    /// and `false` when nothing changed (the returned plan is the cached
+    /// previous one; the embedder can skip rendering).
+    pub fn tick(&mut self) -> (FramePlan, bool) {
         let t0 = Instant::now();
 
         // Fire autorun once after the configured delay (env-driven perf harness).
@@ -241,10 +264,23 @@ impl Surface {
         let byte_count = self.panel.pump();
         let t_pump = Instant::now();
         let snap = self.panel.capture_frame();
+
+        // ghostty's dirty flag is the authoritative "did the screen change
+        // since the last capture" signal — but it's only meaningful AFTER
+        // `render_state_update`, which runs inside `capture_frame`. So we must
+        // capture first, then decide. (Always-capturing is cheap — a row walk
+        // — and idle ticks are rare now that the notifier drives them; when
+        // nothing changed we skip the plan rebuild and tell the caller to skip
+        // `update()`, so the GPU stays idle.)
+        if snap.dirty == Dirty::False {
+            return (self.last_plan, false);
+        }
+
         let t_snap = Instant::now();
         let plan = self.planner.build_plan(&snap);
         let t_plan = Instant::now();
         self.panel.clear_dirty();
+        self.last_plan = plan;
 
         let total_us = t_plan.duration_since(t0).as_micros();
         // Log slow frames (>5ms) or frames that ingested a lot of PTY bytes.
@@ -260,7 +296,7 @@ impl Surface {
             );
         }
 
-        plan
+        (plan, true)
     }
 }
 

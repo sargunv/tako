@@ -8,10 +8,12 @@
 //! Field order matters: `face` is declared before `library` so it is dropped
 //! first (FreeType requires faces be freed before their library).
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
 use freetype::Library;
 use freetype::face::LoadFlag;
@@ -75,36 +77,49 @@ pub struct FontFace {
     /// Declared after `face` so the field drop order frees the face first.
     _library: Library,
     /// Parsed font tables for rustybuzz shaping, built once at construction.
-    /// Backed by a leaked copy of the font bytes (see [`Self::from_path`]); the
-    /// leak is ~font_bytes.len() bytes per FontFace, acceptable for one font
-    /// per surface. Without this cache, `shape()` re-parsed the TTF on every
-    /// call and bursts of new graphemes (e.g. `ls -la /usr/bin`) froze the app
-    /// for seconds. Revisit with `ouroboros`/`elsa` if reloads ever leak too
-    /// much (e.g. frequent DPR changes).
+    /// Borrows a process-lifetime `&'static [u8]` from the path-keyed interner
+    /// ([`intern_font_bytes`]): the file is read + leaked once per unique font
+    /// path, then reused across every [`FontFace`] (notably across DPR-change
+    /// reloads, which previously re-leaked the whole file each time).
     rb_face: rustybuzz::Face<'static>,
     pixel_height: u32,
     /// Font units-per-em, cached for scaling rustybuzz design-unit advances.
     units_per_em: u32,
 }
 
+/// Process-lifetime interner of font file bytes, keyed by canonical path.
+/// Each unique font file is read once and leaked; subsequent loads (including
+/// every [`FontFace::set_pixel`] / DPR-driven reload via [`FontFace::from_path`])
+/// reuse the same `&'static` slice instead of re-leaking. Bounded to the number
+/// of distinct font paths ever loaded (typically one). FreeType still keeps its
+/// own `Rc<Vec<u8>>` copy per face (its API requires it); the win is that the
+/// rustybuzz side no longer accumulates.
+static FONT_BYTES: OnceLock<Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
+
+fn intern_font_bytes(path: &Path) -> Result<&'static [u8], FontError> {
+    let map = FONT_BYTES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("font bytes interner poisoned");
+    if let Some(bytes) = guard.get(path) {
+        return Ok(*bytes);
+    }
+    let bytes = std::fs::read(path).map_err(|e| FontError(format!("read font failed: {e}")))?;
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    guard.insert(path.to_path_buf(), leaked);
+    Ok(leaked)
+}
+
 impl FontFace {
     /// Load `path` at `pixel_height` (the cell height in pixels).
     pub fn from_path(path: impl AsRef<Path>, pixel_height: u32) -> Result<Self, FontError> {
-        let bytes = std::fs::read(path.as_ref())
-            .map_err(|e| FontError(format!("read font failed: {e}")))?;
-        let font_bytes = Rc::new(bytes);
+        let path = path.as_ref();
+        let rb_bytes = intern_font_bytes(path)?;
         let library = Library::init()?;
-        // Own the bytes inside the face via a shared Rc clone. freetype-rs
-        // retains its own Rc clone, so we don't keep a separate field.
-        let face = library.new_memory_face(Rc::clone(&font_bytes), 0)?;
+        // FreeType keeps its own Rc<Vec<u8>> copy (its memory-face API requires
+        // it); we can't share the interned &'static through it.
+        let face = library.new_memory_face(Rc::new(rb_bytes.to_vec()), 0)?;
         face.set_pixel_sizes(pixel_height, pixel_height)?;
         let units_per_em = face.raw().units_per_EM.max(1) as u32;
 
-        // Leaked copy for rustybuzz: `Face::from_slice` borrows its input for
-        // the face's whole lifetime, and `Face` isn't 'static unless the bytes
-        // are. `Box::leak` gives us a stable `&'static [u8]` so we can stash
-        // the parsed tables in `rb_face` and skip re-parsing on every shape().
-        let rb_bytes: &'static [u8] = Box::leak((*font_bytes).clone().into_boxed_slice());
         let rb_face = rustybuzz::Face::from_slice(rb_bytes, 0)
             .ok_or_else(|| FontError("rustybuzz parse failed".to_string()))?;
 

@@ -4,3 +4,6 @@ cmux/
 
 # cxx-qt-build: regenerated per-build, contains an absolute build path
 **/.qmlls.ini
+
+# cbindgen: generated per-build from tako-render's repr(C) types
+crates/tako-render/cpp/tako_render.h

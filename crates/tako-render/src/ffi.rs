@@ -86,23 +86,57 @@ pub unsafe extern "C" fn tako_surface_destroy(s: *mut Surface) {
     }
 }
 
-/// Rebuild the frame plan and write it into `*out`. The pointers inside `out`
-/// are valid until the next `tako_surface_tick` or `tako_surface_destroy`.
+/// Rebuild the frame plan and write it into `*out`. Returns `true` when the
+/// plan was actually rebuilt (the caller should `update()` / re-render) and
+/// `false` when nothing changed (the written plan is the cached previous one;
+/// the caller can skip rendering).
 ///
 /// # Safety
 /// `s` must be a valid [`Surface`] pointer. `out` must point to writable memory
 /// the caller owns; the borrowed pointers inside `*out` are invalid after the
 /// next `tako_surface_tick` or [`tako_surface_destroy`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_surface_tick(s: *mut Surface, out: *mut FramePlan) {
+pub unsafe extern "C" fn tako_surface_tick(s: *mut Surface, out: *mut FramePlan) -> bool {
     let Some(surface) = (unsafe { deref(s) }) else {
-        return;
+        return false;
     };
     if out.is_null() {
+        return false;
+    }
+    let (plan, changed) = surface.tick();
+    unsafe { *out = plan };
+    changed
+}
+
+/// Returns the readiness-pipe read fd (`QSocketNotifier` watches this), or -1
+/// if no pipe exists (fall back to a timer wake). The fd is valid for the
+/// surface's lifetime; the caller must not close it.
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_notify_fd(s: *mut Surface) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    // SAFETY: shared borrow only, no mutation.
+    let surface = unsafe { &*s };
+    surface.notify_fd().unwrap_or(-1)
+}
+
+/// Drain pending readiness-wake bytes from the pipe. Non-blocking; call when
+/// the notifier fires, before [`tako_surface_tick`].
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_drain_notify(s: *mut Surface) {
+    if s.is_null() {
         return;
     }
-    let plan = surface.tick();
-    unsafe { *out = plan };
+    // SAFETY: shared borrow only; draining is a read syscall, no Rust mutation.
+    let surface = unsafe { &*s };
+    surface.drain_notify();
 }
 
 // ---- Surface: sizing & DPR ----

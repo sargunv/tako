@@ -29,5 +29,11 @@ rustybuzz = "0.18"
 tako-term = { path = "../tako-term" }
 thiserror = "1.0"
 
+[build-dependencies]
+# cbindgen: generates the C header (`tako_render.h`) for the repr(C) types the
+# C++ QQuickFramebufferObject subclass consumes (FramePlan, Vertex). One source
+# of truth — the hand-mirrored `TakoFramePlan` in the C++ header is gone.
+cbindgen = "0.28"
+
 [lints]
 workspace = true

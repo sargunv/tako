@@ -46,6 +46,29 @@ pub struct SizeInfo {
     pub cell_h_px: u32,
 }
 
+/// How the terminal advertises itself to programs that ask (XTVERSION,
+/// `CSI ? 996 n` color-scheme report, ENQ/DA). Defaults identify as
+/// `tako <crate version>` in dark mode; the embedder overrides via
+/// [`TerminalEffects::with_identity`] when it knows better (e.g. the KDE color
+/// scheme, in Phase 6). Keeping this as data — not a hardcoded trampoline —
+/// means the app owns its identity without touching the FFI callbacks.
+#[derive(Debug, Clone)]
+pub struct TerminalIdentity {
+    /// Full XTVERSION response, e.g. `"tako 0.1.0"`. Stored so the trampoline
+    /// can hand libghostty a stable pointer for the box's lifetime.
+    pub version_string: String,
+    pub color_scheme: ffi::GhosttyColorScheme,
+}
+
+impl Default for TerminalIdentity {
+    fn default() -> Self {
+        Self {
+            version_string: format!("tako {}", env!("CARGO_PKG_VERSION")),
+            color_scheme: ffi::GhosttyColorScheme_GHOSTTY_COLOR_SCHEME_DARK,
+        }
+    }
+}
+
 /// Closure type that returns the current size info. Queried on demand by
 /// the `size` effect. Not `Send` — see the crate threading note.
 pub type SizeCb = Box<dyn Fn() -> SizeInfo>;
@@ -56,6 +79,7 @@ pub struct TerminalEffects {
     pub title_changed: Option<TitleChangedCb>,
     pub pwd_changed: Option<PwdChangedCb>,
     pub size: Option<SizeCb>,
+    pub identity: TerminalIdentity,
 }
 
 /// Boxed `write_pty` callback. Not `Send` (single-threaded terminal).
@@ -76,6 +100,7 @@ impl TerminalEffects {
             title_changed: None,
             pwd_changed: None,
             size: None,
+            identity: TerminalIdentity::default(),
         }
     }
 
@@ -97,6 +122,10 @@ impl TerminalEffects {
     }
     pub fn with_size<F: Fn() -> SizeInfo + 'static>(mut self, f: F) -> Self {
         self.size = Some(Box::new(f));
+        self
+    }
+    pub fn with_identity(mut self, identity: TerminalIdentity) -> Self {
+        self.identity = identity;
         self
     }
 }
@@ -170,19 +199,26 @@ unsafe extern "C" fn trampoline_pwd_changed(
     }
 }
 
-/// XTVERSION responder: claims identity `tako <version>`. libghostty wraps
-/// the response in `DCS > | ... ST` itself; we only supply the version string.
+/// XTVERSION responder: reports the identity string the app set on the
+/// terminal's effects (default `"tako <version>"`). libghostty wraps the
+/// response in `DCS > | ... ST` itself; we only supply the version bytes.
+/// The pointer is into the boxed `TerminalEffects`, which outlives the
+/// terminal (freed in `Drop` after `ghostty_terminal_free`).
 unsafe extern "C" fn trampoline_xtversion(
     _terminal: ffi::GhosttyTerminal,
-    _userdata: *mut c_void,
+    userdata: *mut c_void,
 ) -> ffi::GhosttyString {
-    // Leak-on-each-call: libghostty copies the bytes immediately (terminal.h
-    // docs say "memory must remain valid until the callback returns"). A
-    // 'static slice avoids any lifetime plumbing.
-    const VERSION: &[u8] = b"tako 0.1.0";
+    if userdata.is_null() {
+        return ffi::GhosttyString {
+            ptr: core::ptr::null(),
+            len: 0,
+        };
+    }
+    let effects = unsafe { &*(userdata as *const TerminalEffects) };
+    let bytes = effects.identity.version_string.as_bytes();
     ffi::GhosttyString {
-        ptr: VERSION.as_ptr(),
-        len: VERSION.len(),
+        ptr: bytes.as_ptr(),
+        len: bytes.len(),
     }
 }
 
@@ -255,18 +291,19 @@ unsafe extern "C" fn trampoline_size(
 }
 
 /// CSI ? 996 n (color scheme report). libghostty builds the response; we
-/// just report light/dark. Currently hardcoded dark; TODO: hook to KDE
-/// color scheme.
+/// report the scheme the app set on the terminal's effects (default Dark).
+/// Phase 6 wires this to the KDE color scheme.
 unsafe extern "C" fn trampoline_color_scheme(
     _terminal: ffi::GhosttyTerminal,
-    _userdata: *mut c_void,
+    userdata: *mut c_void,
     out: *mut ffi::GhosttyColorScheme,
 ) -> bool {
-    if out.is_null() {
+    if out.is_null() || userdata.is_null() {
         return false;
     }
+    let effects = unsafe { &*(userdata as *const TerminalEffects) };
     // SAFETY: writing an enum value to a valid out-pointer.
-    unsafe { *out = ffi::GhosttyColorScheme_GHOSTTY_COLOR_SCHEME_DARK };
+    unsafe { *out = effects.identity.color_scheme };
     true
 }
 

@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use tako_term::effects::{SizeInfo, TerminalEffects};
+use tako_term::effects::{SizeInfo, TerminalEffects, TerminalIdentity};
 use tako_term::pty::StreamingPty;
 use tako_term::snapshot::FrameSnapshot;
 use tako_term::terminal::{RenderState, Terminal};
@@ -75,23 +75,25 @@ pub struct TerminalPanel {
 
 impl TerminalPanel {
     /// Spawn a shell on a PTY and wire up OSC effects with the default
-    /// scrollback cap ([`DEFAULT_SCROLLBACK`]).
+    /// scrollback cap ([`DEFAULT_SCROLLBACK`]) and identity.
     pub fn new(cols: u16, rows: u16) -> Result<Self, Error> {
         Self::with_pty_and_scrollback(
             cols,
             rows,
             DEFAULT_SCROLLBACK,
+            TerminalIdentity::default(),
             StreamingPty::spawn_shell(cols, rows)?,
         )
     }
 
     /// Construct a panel around an already-spawned PTY and explicit scrollback
-    /// cap. Kept `pub` as a test seam (lets a future test inject a fake PTY
-    /// without spawning a shell).
+    /// cap + terminal identity. Kept `pub` as a test seam (lets a future test
+    /// inject a fake PTY without spawning a shell).
     pub fn with_pty_and_scrollback(
         cols: u16,
         rows: u16,
         scrollback: usize,
+        identity: TerminalIdentity,
         pty: StreamingPty,
     ) -> Result<Self, Error> {
         let shared = Rc::new(RefCell::new(Shared::default()));
@@ -133,7 +135,8 @@ impl TerminalPanel {
                     cell_w_px: m.cell_w,
                     cell_h_px: m.cell_h,
                 }
-            });
+            })
+            .with_identity(identity);
 
         let terminal = Terminal::new_with_effects(cols, rows, scrollback, effects)?;
         let state = RenderState::new()?;
@@ -281,6 +284,19 @@ impl TerminalPanel {
         if let Err(e) = self.state.clear_dirty() {
             log::warn!("clear_dirty failed: {e}");
         }
+    }
+
+    /// Raw fd that becomes readable when PTY output is pending, for an
+    /// event-loop notifier (e.g. Qt `QSocketNotifier`). `None` if the
+    /// readiness pipe couldn't be created — fall back to a timer wake.
+    pub fn notify_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.pty.notify_fd()
+    }
+
+    /// Clear pending readiness-wake bytes. Non-blocking; call when the
+    /// notifier fires, before [`Self::pump`].
+    pub fn drain_notify(&self) {
+        self.pty.drain_notify();
     }
 
     /// Take the latest host-bound window title, if it changed since the last

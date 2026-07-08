@@ -10,6 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 log = "0.4"
+# nix: safe Unix wrappers for the PTY-readiness notify pipe (pipe + fcntl
+# non-blocking). Keeps the wake path out of `unsafe` despite the workspace
+# `unsafe_code = deny`.
+nix = { version = "0.29", default-features = false, features = ["fs", "process"] }
 portable-pty = "0.8"
 
 [build-dependencies]

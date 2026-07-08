@@ -23,6 +23,7 @@
 #include <QOpenGLContext>
 #include <QQuickWindow>
 #include <QScreen>
+#include <QSocketNotifier>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtQuick/qquickwindow.h>
@@ -36,44 +37,9 @@
 #include <ghostty/vt/key/event.h>
 #include <ghostty/vt/mouse/event.h>
 
-// ---- C ABI into the Rust `tako_render` crate ----
-
-extern "C" {
-// surface.rs
-void *tako_surface_new(uint16_t cols, uint16_t rows, const char *font_path,
-                       uint32_t pixel_height, float dpr);
-void tako_surface_destroy(void *surface);
-void tako_surface_tick(void *surface, TakoFramePlan *out);
-void tako_surface_write(void *surface, const uint8_t *data, size_t len);
-void tako_surface_resize_pixels(void *surface, uint32_t width_px, uint32_t height_px);
-void tako_surface_set_dpr(void *surface, float dpr);
-
-// input.rs (Surface::key_event / mouse_event / focus / paste / scroll)
-void tako_surface_key_event(void *surface, uint32_t action, uint32_t key,
-                            uint16_t mods, uint16_t consumed_mods,
-                            const uint8_t *text, size_t text_len);
-void tako_surface_mouse_event(void *surface, uint32_t action, uint32_t button,
-                              float x_px, float y_px, uint16_t mods);
-void tako_surface_mouse_set_any_button(void *surface, bool pressed);
-void tako_surface_focus_event(void *surface, bool gained);
-void tako_surface_paste(void *surface, const uint8_t *data, size_t len);
-void tako_surface_scroll(void *surface, int64_t delta_rows);
-int32_t tako_surface_mouse_tracking(void *surface);
-size_t tako_surface_take_title(void *surface, uint8_t *out_buf, size_t cap);
-
-// gl_renderer.rs
-void *tako_gl_renderer_new();
-void tako_gl_renderer_destroy(void *renderer);
-void tako_gl_renderer_ensure_gl(void *renderer,
-                                const void *(*loader)(const char *, void *),
-                                void *loader_userdata);
-void tako_gl_renderer_ingest_plan(void *renderer, const TakoFramePlan *plan,
-                                  int32_t viewport_w, int32_t viewport_h);
-void tako_gl_renderer_render(void *renderer);
-
-// qml_init.rs
-void tako_register_qml_types();
-}
+// The C ABI (FramePlan, Surface, GlRenderer, LoaderFn, and the
+// tako_surface_* / tako_gl_renderer_* declarations) comes from the
+// cbindgen-generated `tako_render.h`, pulled in via the header.
 
 // Register TakoTerminalView as `TerminalView` under a dedicated URI. Call once
 // before loading QML (see tako_render::qml_init).
@@ -100,20 +66,51 @@ TakoTerminalView::TakoTerminalView(QQuickItem *parent)
     setAcceptedMouseButtons(Qt::AllButtons);
     setAcceptHoverEvents(true);
     setFlag(ItemAcceptsInputMethod, true);  // IME preedit (TODO: render)
+    // Create the surface + readiness notifier HERE, on the GUI thread.
+    // QQuickFramebufferObject::createRenderer() runs on the QSG render thread;
+    // doing this there would (a) parent a QObject (the notifier) cross-thread
+    // and (b) put the !Send Rust Surface on the wrong thread while the
+    // GUI-thread timer/notifier tick it. The Surface is GUI-only state.
+    ensureSurface();
+    // Safety + autorun timer. Output latency is handled by m_notifier (wired
+    // in ensureSurface once the surface — and its readiness fd — exists); this
+    // timer just keeps the autorun harness ticking and catches any wake the
+    // notifier might miss at teardown edges.
     m_timer = new QTimer(this);
-    m_timer->setInterval(16);  // ~60 Hz poll for PTY output
-    connect(m_timer, &QTimer::timeout, this, [this] {
-        if (m_surface) {
-            tako_surface_tick(m_surface, &m_plan);
-            flushHostTitle();
-        }
-        update();  // schedule a render (synchronize + render on the SG thread)
-    });
+    m_timer->setInterval(100);
+    connect(m_timer, &QTimer::timeout, this, [this] { pumpAndRender(); });
     m_timer->start();
 }
 
 TakoTerminalView::~TakoTerminalView() {
+    // Stop watching the readiness fd before the surface (which owns it) is
+    // freed — otherwise the notifier would dangle.
+    if (m_notifier) m_notifier->setEnabled(false);
     if (m_surface) tako_surface_destroy(m_surface);
+}
+
+void TakoTerminalView::pumpAndRender() {
+    if (!m_surface) return;
+    // Reconcile the grid to the current item geometry. The surface was created
+    // in the constructor at a placeholder 80×24 (width()/height() were 0 then),
+    // and the initial QML layout doesn't reliably arrive as a geometryChange
+    // before the first paints — so pull the size here, every tick.
+    // `tako_surface_resize_pixels` short-circuits when cols/rows are unchanged,
+    // so this is a cheap no-op once the grid matches.
+    if (width() >= 1.0 && height() >= 1.0) {
+        const float dpr = windowDpr();
+        tako_surface_resize_pixels(
+            m_surface, static_cast<uint32_t>(width() * dpr),
+            static_cast<uint32_t>(height() * dpr));
+    }
+    // Clear any pending wake bytes so the level-triggered notifier settles,
+    // then advance the terminal. tick() reports whether a new frame was
+    // actually produced; if not, skip update() and the GPU stays idle.
+    tako_surface_drain_notify(m_surface);
+    if (tako_surface_tick(m_surface, &m_plan)) {
+        flushHostTitle();
+        update();
+    }
 }
 
 float TakoTerminalView::windowDpr() const {
@@ -173,6 +170,17 @@ void TakoTerminalView::ensureSurface() {
             const uint32_t phys_h = static_cast<uint32_t>(height() * dpr);
             tako_surface_resize_pixels(m_surface, phys_w, phys_h);
         }
+        // Wire the readiness pipe: wake immediately on PTY output instead of
+        // waiting for the safety timer. fd == -1 means the surface couldn't
+        // create the pipe (timer-only fallback).
+        if (m_surface) {
+            const int fd = tako_surface_notify_fd(m_surface);
+            if (fd >= 0) {
+                m_notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+                connect(m_notifier, &QSocketNotifier::activated, this,
+                        [this] { pumpAndRender(); });
+            }
+        }
     }
 }
 
@@ -196,7 +204,8 @@ void TakoTerminalView::geometryChange(const QRectF &newGeometry,
 }
 
 QQuickFramebufferObject::Renderer *TakoTerminalView::createRenderer() const {
-    const_cast<TakoTerminalView *>(this)->ensureSurface();
+    // The Surface was created in the constructor (GUI thread); this runs on the
+    // QSG render thread and only needs to spawn the render-thread Renderer.
     return new TakoTerminalRenderer();
 }
 

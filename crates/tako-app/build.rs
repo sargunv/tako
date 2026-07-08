@@ -26,6 +26,12 @@ fn main() {
         )
     });
 
+    // tako-render's build script generates `cpp/tako_render.h` (the C ABI
+    // contract: FramePlan/Vertex + the tako_surface_*/tako_gl_renderer_* decls)
+    // next to the hand-written C++. Add `cpp/` to the include path so the view
+    // resolves `#include "tako_render.h"` and consumes a single source of truth
+    // instead of re-declaring the contract by hand.
+
     // Suppress GCC 16's -Wsfinae-incomplete: libstdc++'s std::data SFINAE probe
     // sees QChar/QRegularExpression forward-declared-but-incomplete before Qt
     // defines them later in the TU. Benign header-ordering artifact between
@@ -38,6 +44,7 @@ fn main() {
             .cpp_file(CppFile::from(render_cpp.join("tako_terminal_view.h")))
             .cpp_file(CppFile::from(render_cpp.join("tako_terminal_view.cpp")))
             .include_dir(&ghostty_include)
+            .include_dir(&render_cpp)
             .cc_builder(|cc| {
                 cc.flag_if_supported("-Wno-sfinae-incomplete");
             })
