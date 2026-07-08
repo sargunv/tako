@@ -18,6 +18,7 @@
 #include "tako_terminal_view.h"
 
 #include <QGuiApplication>
+#include <QClipboard>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QOpenGLContext>
@@ -398,9 +399,30 @@ void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
             qt_mods_to_ghostty(e->modifiers()));
         m_anyMouseButtonHeld = true;
         tako_surface_mouse_set_any_button(m_surface, true);
+    } else if (e->button() == Qt::MiddleButton) {
+        // Middle-click paste from the PRIMARY selection (X11 convention).
+        if (const auto *clip = QGuiApplication::clipboard()) {
+            const QString text = clip->text(QClipboard::Selection);
+            if (!text.isEmpty()) {
+                const QByteArray bytes = text.toUtf8();
+                tako_surface_paste(
+                    m_surface,
+                    reinterpret_cast<const uint8_t *>(bytes.constData()),
+                    static_cast<size_t>(bytes.size()));
+            }
+        }
     } else {
-        // Local selection: anchor start point here.
-        // TODO: selection engine.
+        // Selection gesture: begin (press). time_ns drives multi-click counting.
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        const auto time_ns = static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        tako_surface_selection_begin(
+            m_surface,
+            static_cast<float>(p.x()) * dpr,
+            static_cast<float>(p.y()) * dpr,
+            time_ns, qt_mods_to_ghostty(e->modifiers()));
+        pumpAndRender();
     }
     e->accept();
 }
@@ -419,6 +441,25 @@ void TakoTerminalView::mouseReleaseEvent(QMouseEvent *e) {
             static_cast<float>(p.x()) * dpr,
             static_cast<float>(p.y()) * dpr,
             qt_mods_to_ghostty(e->modifiers()));
+    } else if (e->button() == Qt::LeftButton) {
+        // Finalize the selection. Copy the result to the PRIMARY selection
+        // (X11 middle-click paste convention) — copy-on-select.
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        char buf[8192];
+        const size_t n = tako_surface_selection_end(
+            m_surface,
+            static_cast<float>(p.x()) * dpr,
+            static_cast<float>(p.y()) * dpr,
+            reinterpret_cast<uint8_t *>(buf), sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (auto *clip = QGuiApplication::clipboard()) {
+                clip->setText(QString::fromUtf8(buf, static_cast<int>(n)),
+                              QClipboard::Selection);
+            }
+        }
+        pumpAndRender();
     }
     // Any-button tracking state: recompute from current app mouse buttons.
     const bool any_held =
@@ -442,8 +483,21 @@ void TakoTerminalView::mouseMoveEvent(QMouseEvent *e) {
             static_cast<float>(p.x()) * dpr,
             static_cast<float>(p.y()) * dpr,
             qt_mods_to_ghostty(e->modifiers()));
+    } else if (e->buttons() & Qt::LeftButton) {
+        // Drag-extend the selection while the left button is held. Gated on
+        // the live button state (not m_anyMouseButtonHeld, which tracks the
+        // mouse-encoder's any-button flag and is only set in the tracking-on
+        // branch).
+        const float dpr = windowDpr();
+        const QPointF p = e->position();
+        if (tako_surface_selection_extend(
+                m_surface,
+                static_cast<float>(p.x()) * dpr,
+                static_cast<float>(p.y()) * dpr,
+                qt_mods_to_ghostty(e->modifiers()))) {
+            pumpAndRender();
+        }
     }
-    // TODO: drag selection when not tracking.
     e->accept();
 }
 
@@ -507,6 +561,36 @@ void TakoTerminalView::focusOutEvent(QFocusEvent *e) {
 void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
     if (!m_surface) {
         QQuickFramebufferObject::keyPressEvent(e);
+        return;
+    }
+
+    // Terminal copy/paste shortcuts (Ctrl+Shift+C / Ctrl+Shift+V) — handled
+    // before the key encoder so they never reach the shell.
+    if ((e->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier)) ==
+            (Qt::ControlModifier | Qt::ShiftModifier) &&
+        (e->key() == Qt::Key_C || e->key() == Qt::Key_V)) {
+        if (auto *clip = QGuiApplication::clipboard()) {
+            if (e->key() == Qt::Key_C) {
+                char buf[8192];
+                const size_t n = tako_surface_selection_text(
+                    m_surface, reinterpret_cast<uint8_t *>(buf), sizeof(buf) - 1);
+                if (n > 0) {
+                    buf[n] = '\0';
+                    clip->setText(QString::fromUtf8(buf, static_cast<int>(n)),
+                                  QClipboard::Clipboard);
+                }
+            } else {
+                const QString text = clip->text(QClipboard::Clipboard);
+                if (!text.isEmpty()) {
+                    const QByteArray bytes = text.toUtf8();
+                    tako_surface_paste(
+                        m_surface,
+                        reinterpret_cast<const uint8_t *>(bytes.constData()),
+                        static_cast<size_t>(bytes.size()));
+                }
+            }
+        }
+        e->accept();
         return;
     }
 

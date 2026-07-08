@@ -14,6 +14,7 @@ use tako_term::key;
 use tako_term::key::{KeyEncoder, KeyEvent};
 use tako_term::modes;
 use tako_term::mouse::{MouseEncoder, MouseEvent};
+use tako_term::selection::Selection;
 use tako_term::snapshot::{Cursor, Dirty};
 
 use crate::Error;
@@ -21,9 +22,15 @@ use crate::font::CellMetrics;
 use crate::frame_planner::FramePlan;
 use crate::frame_planner::FramePlanner;
 use crate::panel::TerminalPanel;
+use crate::selection::SelectionEngine;
 
 /// A live terminal surface. Drop closes the PTY and frees everything.
 pub struct Surface {
+    /// Selection gesture engine. Declared BEFORE `panel` so Rust's
+    /// declaration-order drop frees the gesture (and its anchored terminal
+    /// ref) before the terminal itself. The gesture borrows the terminal per
+    /// event and is `!Send`.
+    selection: SelectionEngine,
     panel: TerminalPanel,
     planner: FramePlanner,
     key_encoder: KeyEncoder,
@@ -41,11 +48,9 @@ pub struct Surface {
     /// happens on a non-idle tick.
     last_plan: FramePlan,
     /// Set whenever *view* state changes in a way `snap.dirty` can't observe —
-    /// currently just a DPR/font reload (`set_dpr`): the terminal content is
-    /// unchanged (so the render-state dirty flag stays false and cols/rows are
-    /// unchanged, making `resize_to_pixels` a no-op) but the glyphs, atlas, and
-    /// the GL viewport all need a rebuild + `update()` or the host renders the
-    /// new big glyphs into the stale small viewport. Cleared after `build_plan`.
+    /// currently a DPR/font reload (`set_dpr`) or a selection change: neither
+    /// dirties terminal content, so without this the idle-skip would suppress
+    /// `update()` and the highlight/glyphs wouldn't redraw.
     needs_replan: bool,
     /// Last rendered cursor state. libghostty-vt can report `Dirty::False` for
     /// cursor-only movement, so cursor changes are tracked separately.
@@ -80,7 +85,14 @@ impl Surface {
 
     fn assemble(panel: TerminalPanel, planner: FramePlanner, dpr: f32) -> Result<Self, Error> {
         let mouse_encoder = MouseEncoder::new()?;
+        // The selection engine anchors its gesture to the panel's terminal;
+        // created here (GUI thread) and dropped before the panel (field order).
+        let mut selection = SelectionEngine::new(panel.terminal())?;
+        // Sync the engine's geometry with the initial cell metrics + grid.
+        let cell = planner.cell();
+        selection.set_geometry(panel.cols(), panel.rows(), cell.width, cell.height);
         Ok(Self {
+            selection,
             panel,
             planner,
             key_encoder: KeyEncoder::new()?,
@@ -119,6 +131,14 @@ impl Surface {
         let cell = self.planner.set_dpr(dpr);
         // Refresh the size-query snapshot with the new cell metrics.
         self.panel.set_cell_metrics(cell);
+        // Refresh selection engine geometry too (cell_w/cell_h changed even
+        // though cols/rows didn't).
+        self.selection.set_geometry(
+            self.panel.cols(),
+            self.panel.rows(),
+            cell.width,
+            cell.height,
+        );
         // Force a replan even though terminal content (and thus cols/rows)
         // is unchanged: the font, atlas, and GL viewport all changed, and
         // without this the idle-skip would suppress `update()` and the host
@@ -145,6 +165,8 @@ impl Surface {
         // (surface px → cell coords) stays correct.
         self.mouse_encoder
             .set_size(cols as u32 * cw, rows as u32 * ch, cw, ch, 0);
+        // And the selection engine's geometry (px→cell + gesture geometry).
+        self.selection.set_geometry(cols, rows, cw, ch);
     }
 
     /// Send typed input (keyboard) to the shell.
@@ -198,6 +220,11 @@ impl Surface {
             .key_encoder
             .encode(self.panel.terminal(), &self.key_event);
         if !bytes.is_empty() {
+            // Typing dismisses the selection (matches xterm/ghostty). Modifier
+            // keys alone produce no bytes, so they don't clear it.
+            if self.panel.terminal().selection().is_some() {
+                self.install_selection(None);
+            }
             self.panel.write_input(&bytes);
         }
     }
@@ -213,6 +240,13 @@ impl Surface {
         y_px: f32,
         mods: u16,
     ) {
+        // Mouse tracking just turned on (or was on) while we may have an
+        // in-progress selection gesture — abort it so no dangling highlight
+        // survives into tracking mode.
+        if self.panel.terminal().selection().is_some() {
+            self.selection.abort(self.panel.terminal_mut());
+            self.install_selection(None);
+        }
         self.mouse_event.set_action(action);
         match button {
             Some(b) => self.mouse_event.set_button(b),
@@ -232,6 +266,88 @@ impl Surface {
     /// dedup). Call on press/release; the encoder does not query this itself.
     pub fn mouse_set_any_button(&mut self, pressed: bool) {
         self.mouse_encoder.set_any_button_pressed(pressed);
+    }
+
+    // ---- selection (mouse-tracking-off branch) ----
+
+    /// Pointer press that begins a selection gesture. Call only when mouse
+    /// tracking is off. `time_ns` is a monotonic timestamp for multi-click
+    /// counting; `mods` is a GhosttyMods bitmask (Alt → rectangle mode).
+    ///
+    /// For a single click this clears any existing selection; a double-click
+    /// installs a word selection; a triple-click installs a line selection.
+    pub fn selection_begin(&mut self, x_px: f32, y_px: f32, time_ns: u64, mods: u16) {
+        let rectangle = (mods & tako_term::ffi::GHOSTTY_MODS_ALT as u16) != 0;
+        let sel = self
+            .selection
+            .begin(self.panel.terminal(), x_px, y_px, time_ns, rectangle);
+        // Install the press result: Some → word/line selection; None → single
+        // click clears any existing selection (cell behavior returns null).
+        self.install_selection(sel);
+    }
+
+    /// Pointer drag extending the selection. Returns `true` if the installed
+    /// selection changed (the caller should ensure a repaint happens). Call only
+    /// when mouse tracking is off.
+    pub fn selection_extend(&mut self, x_px: f32, y_px: f32, mods: u16) -> bool {
+        let rectangle = (mods & tako_term::ffi::GHOSTTY_MODS_ALT as u16) != 0;
+        if let Some(sel) = self
+            .selection
+            .extend(self.panel.terminal(), x_px, y_px, rectangle)
+        {
+            self.install_selection(Some(sel));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pointer release finalizing the gesture. Returns the formatted selection
+    /// text (for copy-on-select) when the gesture produced a non-empty
+    /// selection. Call only when mouse tracking is off.
+    pub fn selection_end(&mut self, x_px: f32, y_px: f32) -> Option<String> {
+        let dragged = self.selection.end(self.panel.terminal(), x_px, y_px);
+        // A pure click (no drag) still leaves a single-cell / word / line
+        // selection installed from the multi-click behavior; format whatever is
+        // active. We return text regardless of `dragged` so copy-on-select also
+        // covers double/triple-click selections.
+        let _ = dragged;
+        self.selection_text()
+    }
+
+    /// Format the currently-installed selection as plain text (the copy path).
+    /// `None` when there's no active selection or it's empty.
+    pub fn selection_text(&self) -> Option<String> {
+        let bytes = self.panel.terminal().selection_format(
+            None,
+            tako_term::selection::Format::Plain,
+            true,
+            true,
+        )?;
+        if bytes.is_empty() {
+            None
+        } else {
+            String::from_utf8(bytes).ok()
+        }
+    }
+
+    /// Clear the active selection and reset the gesture (abort, mode-change,
+    /// or user-driven clear).
+    pub fn selection_clear(&mut self) {
+        if self.panel.terminal().selection().is_some() {
+            self.install_selection(None);
+        }
+        self.selection.abort(self.panel.terminal_mut());
+        self.needs_replan = true;
+    }
+
+    /// Install a selection snapshot (or clear with `None`) into the terminal
+    /// and flag a replan so the highlight redraws.
+    fn install_selection(&mut self, sel: Option<Selection>) {
+        if let Err(e) = self.panel.terminal_mut().set_selection(sel.as_ref()) {
+            log::warn!("set_selection failed: {e}");
+        }
+        self.needs_replan = true;
     }
 
     /// Focus gained/lost. No-op when focus reporting (DEC mode 1004) is off.

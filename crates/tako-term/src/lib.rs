@@ -20,10 +20,14 @@ pub mod ffi {
 }
 
 pub mod effects;
+pub mod gesture;
+pub mod grid_ref;
 pub mod input;
 pub mod modes;
 pub mod mouse;
+pub mod point;
 pub mod pty;
+pub mod selection;
 pub mod snapshot;
 pub mod terminal;
 

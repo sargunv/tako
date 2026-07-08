@@ -312,8 +312,15 @@ impl FramePlanner {
         for (row_i, row) in snap.rows_data.iter().enumerate() {
             let row_y = row_i as f32 * ch;
             let baseline = row_y + ascent as f32;
+            // The selected cell range for this row (inclusive), if any. Cells
+            // inside it get inverted fg/bg — the xterm/ghostty selection
+            // rendering, which works with the opaque-quad pipeline (no
+            // blending needed) and stays legible on any background.
+            let sel = row.selection;
             for (col_i, cell) in row.cells.iter().enumerate() {
                 let col_x = col_i as f32 * cw;
+                let selected =
+                    sel.is_some_and(|(sx, ex)| col_i >= sx as usize && col_i <= ex as usize);
 
                 // Resolve effective fg/bg. `cell.fg`/`cell.bg` are None when
                 // the cell has no explicit color → fall back to the terminal
@@ -328,11 +335,16 @@ impl FramePlanner {
                     Some(c) => (c.r, c.g, c.b),
                     None => default_bg,
                 };
-                let (eff_fg, eff_bg) = if cell.style.inverse {
+                // Selection inverts fg/bg for cells in the range (applied after
+                // SGR-7 inverse so both compose correctly).
+                let (mut eff_fg, mut eff_bg) = if cell.style.inverse {
                     (raw_bg, raw_fg)
                 } else {
                     (raw_fg, raw_bg)
                 };
+                if selected {
+                    core::mem::swap(&mut eff_fg, &mut eff_bg);
+                }
                 // Faint (SGR 2): halve foreground intensity.
                 // TODO(bold/italic/underline): style.bold needs a bold face
                 // variant; italic needs an italic face; underline/strikethrough

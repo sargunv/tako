@@ -106,6 +106,12 @@ pub struct Cell {
 #[derive(Debug, Clone)]
 pub struct Row {
     pub dirty: bool,
+    /// Selected cell range for this row, inclusive, when the terminal has an
+    /// installed selection intersecting this row. `None` when the row has no
+    /// selection highlight (no active selection, or the row doesn't intersect
+    /// it). The render state computes this from the installed selection,
+    /// handling linear vs rectangle splitting.
+    pub selection: Option<(u16, u16)>,
     pub cells: Vec<Cell>,
 }
 
@@ -383,6 +389,8 @@ fn walk_rows(state: &RenderState) -> Vec<Row> {
             row_cells.push(read_cell(cells.raw));
         }
 
+        let selection = row_get_selection(iter.raw);
+
         // Clear this row's dirty flag now that we've captured it.
         let clean = false;
         let _ = unsafe {
@@ -395,11 +403,34 @@ fn walk_rows(state: &RenderState) -> Vec<Row> {
 
         out.push(Row {
             dirty,
+            selection,
             cells: row_cells,
         });
     }
 
     out
+}
+
+/// Read this row's selected cell range. Returns `None` when the row doesn't
+/// intersect the active selection (NO_VALUE) — i.e. no selection is installed
+/// or this row is outside it.
+fn row_get_selection(iter: ffi::GhosttyRenderStateRowIterator) -> Option<(u16, u16)> {
+    // SAFETY: zero-init valid for this sized-struct POD; the library reads
+    // `size` to decide how many fields to write.
+    let mut raw: ffi::GhosttyRenderStateRowSelection = unsafe { core::mem::zeroed() };
+    raw.size = core::mem::size_of::<ffi::GhosttyRenderStateRowSelection>();
+    let result = unsafe {
+        ffi::ghostty_render_state_row_get(
+            iter,
+            ffi::GhosttyRenderStateRowData_GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION,
+            &mut raw as *mut _ as *mut core::ffi::c_void,
+        )
+    };
+    if result == ffi::GhosttyResult_GHOSTTY_SUCCESS {
+        Some((raw.start_x, raw.end_x))
+    } else {
+        None
+    }
 }
 
 fn read_cell(cells: ffi::GhosttyRenderStateRowCells) -> Cell {

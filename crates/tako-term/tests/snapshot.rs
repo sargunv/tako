@@ -5,7 +5,6 @@
 
 use tako_term::snapshot::{Dirty, FrameSnapshot};
 use tako_term::terminal::{RenderState, Terminal};
-
 /// Concatenate all graphemes in a row.
 fn row_text(row: &tako_term::snapshot::Row) -> String {
     row.cells.iter().map(|c| c.grapheme.as_str()).collect()
@@ -119,4 +118,41 @@ fn cursor_only_move_updates_snapshot_even_when_not_dirty() {
         "libghostty-vt does not mark cursor-only moves dirty"
     );
     assert_eq!(snap.cursor.viewport, Some((2, 0)));
+}
+
+#[test]
+fn installed_selection_is_captured_as_per_row_ranges() {
+    let (mut t, mut rs) = fresh_terminal();
+    t.vt_write(b"hello world");
+
+    // No selection yet → no row carries a range.
+    let snap = FrameSnapshot::capture(&mut t, &mut rs);
+    assert!(
+        snap.rows_data[0].selection.is_none(),
+        "no selection should be installed initially"
+    );
+    rs.clear_dirty().expect("clear_dirty");
+
+    // select_word at column 0 → "hello" (cols 0..4), install it.
+    let point = tako_term::point::Point::active(0, 0);
+    let ref_ = t.grid_ref(point).expect("grid_ref");
+    let sel = t.select_word(&ref_, &[]).expect("select_word");
+    t.set_selection(Some(&sel)).expect("set_selection");
+
+    let snap2 = FrameSnapshot::capture(&mut t, &mut rs);
+    let range = snap2.rows_data[0]
+        .selection
+        .expect("row 0 should be selected");
+    assert!(
+        range.0 <= 4 && range.1 >= 4,
+        "word \"hello\" (cols 0..4) should be selected; got {range:?}"
+    );
+
+    // Clearing the selection removes the range.
+    t.set_selection(None).expect("clear selection");
+    let snap3 = FrameSnapshot::capture(&mut t, &mut rs);
+    assert!(
+        snap3.rows_data[0].selection.is_none(),
+        "selection range should clear after clearing the installed selection"
+    );
 }

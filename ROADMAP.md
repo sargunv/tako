@@ -224,9 +224,17 @@ GraphicsApp; on X11 usually GL. Either way Tako's code is the same.
 - **Paste**: `ghostty_paste_encode` strips unsafe controls and wraps in
   bracketed paste markers when DEC mode 2004 is set.
 - **Selection / clipboard** _(planned)_: PRIMARY (X11 middle-click) + CLIPBOARD.
-  `GhosttySelection` + grid-ref helpers in libghostty-vt;
-  drag/word/line/rectangle logic host-implemented. OSC 52 with read/write
-  confirm prompts.
+  At our pinned ghostty commit, libghostty-vt ships the **full**
+  `GhosttySelectionGesture` state machine (press/drag/release/autoscroll/
+  deep-press + multi-click behaviors), semantic derives (`select_word` /
+  `select_word_between` / `select_line` / `select_output` / `select_all`),
+  keyboard endpoint adjustment (`selection_adjust`), terminal-owned tracked
+  active selection (`OPT_SELECTION`), per-row render ranges
+  (`GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION`), and one-shot clipboard formatting
+  (`selection_format_alloc`). Tako **drives** the gesture from Qt mouse events
+  (pixel→cell resolution, geometry plumbing, install/preview, repaint, clipboard
+  integration); it does not hand-roll the drag/multi-click logic. OSC 52 with
+  read/write confirm prompts deferred.
 - **IME** _(planned)_: `QInputMethodEvent` → render preedit inline. No
   libghostty-vt API; the host owns the preedit string and its rendering.
 
@@ -619,12 +627,23 @@ Subtasks (✓ = landed in this repo):
 - [x] **OSC 0/2 (title)** wired: window title updates from shell.
 - [x] **OSC 7 (cwd)** captured into Surface state (consumer TBD — Phase 4
       workspace metadata).
-- [ ] **Selection engine:** drag-select, word/line select (double/triple click),
-      rectangle mode, copy-on-select, scrollback auto-scroll on drag to edge.
-      Host-implemented (libghostty-vt only provides `GhosttySelection` +
-      grid-ref helpers).
-- [ ] **Clipboard:** copy/paste shortcuts (Ctrl+Shift+C/V), middle-click paste
-      (PRIMARY), OSC 52 dispatch with read/write confirm prompts.
+- [x] **Selection engine (core):** drag-select, word/line select (double/triple
+      click), rectangle mode (Alt-drag), copy-on-select to PRIMARY, explicit
+      copy to CLIPBOARD (Ctrl+Shift+C). Drives libghostty-vt's
+      `GhosttySelectionGesture` state machine (which, at our pinned commit, owns
+      press/drag/release/autoscroll/deep-press + multi-click behaviors and
+      word/line derives); the host does pixel→cell resolution, geometry
+      plumbing, install/preview, repaint triggering, and clipboard integration.
+- [ ] **Selection engine (deferred):** autoscroll-to-edge on drag (gesture's
+      `AUTOSCROLL_TICK` + a C++ `QTimer` driving it when the gesture reports
+      `UP`/`DOWN`), keyboard selection (Shift+arrows via
+      `ghostty_terminal_selection_adjust`, seeded from the cursor), and
+      scrollback selection (viewport-tag plumbing for selecting while scrolled
+      back — the coordinate system already supports it).
+- [ ] **Clipboard (deferred):** OSC 52 dispatch with read/write confirm prompts
+      (needs an effects callback addition). The copy/paste shortcuts
+      (Ctrl+Shift+C/V), middle-click paste (PRIMARY), and copy-on-select landed
+      with the core selection engine above.
 - [ ] **IME composition:** render preedit string (no libghostty-vt API; host
       responsibility). MVP: render unformatted preedit text.
 - [ ] **Cursor blink:** 530 ms on/off phase (xterm default); suppressed on
@@ -636,9 +655,10 @@ Subtasks (✓ = landed in this repo):
 - [ ] **Config (`tako-config`):** font family/size, palette, fg/bg/cursor,
       scrollback limit, cursor style default. Currently the crate is a stub; the
       surface hard-codes `fc-match monospace` and ghostty defaults.
-- [x] **Deliverable (partial):** a usable native terminal. Dogfood daily.
-      Selection + clipboard + IME are the major remaining usability gaps before
-      this is fully ticked.
+- [x] **Deliverable (partial):** a usable native terminal. Dogfood daily. Core
+      selection + clipboard landed; the remaining usability gaps before this is
+      fully ticked are selection autoscroll/keyboard/scrollback, OSC 52, and
+      IME.
 
 ### Phase 2 — Sidebar, tabs, splits, workspaces _(~3–4 weeks)_
 

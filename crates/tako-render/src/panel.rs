@@ -168,6 +168,11 @@ impl TerminalPanel {
         &self.terminal
     }
 
+    /// Borrow the terminal mutably (for selection install + grid_ref resolve).
+    pub fn terminal_mut(&mut self) -> &mut Terminal {
+        &mut self.terminal
+    }
+
     /// Send bytes (typed input) to the child shell. Logs IO errors instead of
     /// surfacing them: a failing write usually means the child died, which the
     /// next pump observes as EOF — there's nothing actionable for the caller.

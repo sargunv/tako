@@ -21,6 +21,7 @@ pub mod frame_planner;
 pub mod gl_renderer;
 pub mod panel;
 pub mod qml_init;
+pub mod selection;
 pub mod surface;
 
 pub use atlas::{GlyphAtlas, GlyphRect};
@@ -28,6 +29,7 @@ pub use font::{CellMetrics, FontError, FontFace, GlyphBitmap, ShapedGlyph};
 pub use frame_planner::{FramePlan, FramePlanner, Vertex};
 pub use gl_renderer::GlRenderer;
 pub use panel::TerminalPanel;
+pub use selection::SelectionEngine;
 pub use surface::Surface;
 
 /// A surface setup or runtime failure.

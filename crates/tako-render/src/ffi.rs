@@ -37,6 +37,29 @@ unsafe fn deref<'a, T>(p: *mut T) -> Option<&'a mut T> {
     }
 }
 
+/// Copy an optional string into a caller-owned buffer with a NUL terminator.
+/// Returns the byte length (excluding NUL), or 0 if `text` is `None`, `out_buf`
+/// is null, or the buffer is too small. The contract matches
+/// [`tako_surface_take_title`].
+fn write_optional_string(text: Option<&str>, out_buf: *mut u8, cap: usize) -> usize {
+    let Some(text) = text else {
+        return 0;
+    };
+    if out_buf.is_null() || cap == 0 {
+        return 0;
+    }
+    let bytes = text.as_bytes();
+    if bytes.len() + 1 > cap {
+        return 0;
+    }
+    // SAFETY: caller owns `out_buf` for `cap` bytes; we've checked it fits.
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        *out_buf.add(bytes.len()) = 0;
+    }
+    bytes.len()
+}
+
 // ---- Surface lifecycle ----
 
 /// Spawn a surface. `font_path` may be null to use the system default mono
@@ -350,6 +373,106 @@ pub unsafe extern "C" fn tako_surface_mouse_set_any_button(s: *mut Surface, pres
         return;
     };
     surface.mouse_set_any_button(pressed);
+}
+
+// ---- Surface: selection (mouse-tracking-off branch) ----
+
+/// Begin a selection gesture (pointer press). Call only when
+/// [`tako_surface_mouse_tracking`] returns 0. `time_ns` is a monotonic
+/// timestamp in nanoseconds for multi-click counting; `mods` is a GhosttyMods
+/// bitmask (Alt → rectangle mode).
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_selection_begin(
+    s: *mut Surface,
+    x_px: f32,
+    y_px: f32,
+    time_ns: u64,
+    mods: u16,
+) {
+    let Some(surface) = (unsafe { deref(s) }) else {
+        return;
+    };
+    surface.selection_begin(x_px, y_px, time_ns, mods);
+}
+
+/// Extend a selection gesture (pointer drag). Returns 1 if the installed
+/// selection changed (the caller should ensure a repaint), 0 otherwise. Call
+/// only when [`tako_surface_mouse_tracking`] returns 0.
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_selection_extend(
+    s: *mut Surface,
+    x_px: f32,
+    y_px: f32,
+    mods: u16,
+) -> i32 {
+    let Some(surface) = (unsafe { deref(s) }) else {
+        return 0;
+    };
+    i32::from(surface.selection_extend(x_px, y_px, mods))
+}
+
+/// Finalize a selection gesture (pointer release). Copies the resulting
+/// selection text into `out_buf` (NUL-terminated) and returns the byte length
+/// (excluding NUL), or 0 if there was no selection / the buffer was too small.
+/// The caller should place the text on the clipboard (PRIMARY). Call only when
+/// [`tako_surface_mouse_tracking`] returns 0.
+///
+/// Pass `out_buf = null` to skip the copy-out (just finalize the gesture).
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer. If non-null, `out_buf` must point
+/// to `cap` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_selection_end(
+    s: *mut Surface,
+    x_px: f32,
+    y_px: f32,
+    out_buf: *mut u8,
+    cap: usize,
+) -> usize {
+    let Some(surface) = (unsafe { deref(s) }) else {
+        return 0;
+    };
+    let text = surface.selection_end(x_px, y_px);
+    write_optional_string(text.as_deref(), out_buf, cap)
+}
+
+/// Read the currently-installed selection as plain text (the copy path).
+/// Copies into `out_buf` (NUL-terminated) and returns the byte length
+/// (excluding NUL), or 0 if there was no selection / the buffer was too small.
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer. If non-null, `out_buf` must point
+/// to `cap` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_selection_text(
+    s: *mut Surface,
+    out_buf: *mut u8,
+    cap: usize,
+) -> usize {
+    let Some(surface) = (unsafe { deref(s) }) else {
+        return 0;
+    };
+    let text = surface.selection_text();
+    write_optional_string(text.as_deref(), out_buf, cap)
+}
+
+/// Clear the active selection and reset the gesture.
+///
+/// # Safety
+/// `s` must be a valid [`Surface`] pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tako_surface_selection_clear(s: *mut Surface) {
+    let Some(surface) = (unsafe { deref(s) }) else {
+        return;
+    };
+    surface.selection_clear();
 }
 
 /// Focus gained/lost. Forwards focus-reporting bytes to the PTY iff DEC mode

@@ -154,3 +154,24 @@ required.
   new big glyphs into the stale viewport. (General rule: the idle-skip's "did
   anything change" signal must cover every state the plan/viewport depend on,
   not just terminal content.)
+- **Selection is driven by `GhosttySelectionGesture`, not hand-rolled; selection
+  state is view-only and must trip the idle-skip.** At our pinned ghostty
+  commit, libghostty-vt ships the full gesture state machine
+  (`GhosttySelectionGesture`: press/drag/release/autoscroll/deep-press +
+  multi-click behaviors) plus semantic derives and one-shot clipboard
+  formatting. Tako wraps these in `tako-term` (`point`/`grid_ref`/`selection`/
+  `gesture`) and drives them from C++ mouse events via `tako-render`'s
+  `SelectionEngine`. The `GhosttySelectionGesture` handle is GUI-thread-owned
+  and `!Send` (it borrows the `!Send` terminal per event); it lives in the
+  `SelectionEngine` field on `Surface`, **declared before `panel`** so Rust's
+  declaration-order drop frees it before the terminal
+  (`ghostty_selection_gesture_free` allows a NULL terminal, but keeping the
+  order is defensive). Selections are _installed_ into the terminal
+  (`GHOSTTY_TERMINAL_OPT_SELECTION`) so the render-state machinery owns the
+  per-row highlight ranges (`GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION`), which
+  `FrameSnapshot::Row` reads as plain data. A selection change is
+  view-state-only — it does not dirty terminal content — so it MUST set a
+  `needs_replan`-style flag or the idle-skip suppresses the highlight redraw
+  (same trap as the DPR invariant). Selection runs only in the
+  `!mouse_tracking()` branch; if tracking turns on mid-drag, abort the selection
+  (clear `OPT_SELECTION`, reset the gesture).
