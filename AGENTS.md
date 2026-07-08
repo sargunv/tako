@@ -9,7 +9,7 @@ with libghostty-vt as the terminal core.
 tako/
 ├── crates/
 │   ├── tako-term/      libghostty-vt bindgen + link (build.rs fetches/builds); PTY bridge, OSC dispatch
-│   ├── tako-render/    glyph atlas (freetype+rustybuzz) + QQuickFramebufferObject GL renderer
+│   ├── tako-render/    TerminalPanel + FramePlanner + Surface + QQuickFramebufferObject GL renderer (C ABI in ffi.rs)
 │   └── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
 ├── kcfg/               (future) takorc.kcfg schema + .kcfgc codegen
 ├── data/               (future) .desktop, metainfo, icons, D-Bus service file
@@ -54,12 +54,31 @@ required.
 
 <!-- List non-negotiable rules for the project as they emerge. -->
 
-- **`unsafe_code` is denied workspace-wide.** The only permitted exceptions are
-  a cxx-qt `#[cxx_qt::bridge]` module, which needs `unsafe extern` blocks
-  (edition 2024 FFI syntax), and `crates/tako-app/build.rs`, which needs an
-  `unsafe` `cc_builder` closure (cxx-qt-build 0.9's only flag-passing API).
-  Scope the relaxation with a module-level `#![allow(unsafe_code)]` inside the
-  bridge file or `build.rs` only — never relax at crate or workspace level.
+- **`unsafe_code` is denied workspace-wide.** The permitted exceptions are: a
+  cxx-qt `#[cxx_qt::bridge]` module (`unsafe extern` blocks, edition 2024 FFI
+  syntax); `crates/tako-app/build.rs` (an `unsafe` `cc_builder` closure —
+  cxx-qt-build 0.9's only flag-passing API); and the `libghostty-vt` boundary in
+  `crates/tako-term/src/*` + the C ABI in `crates/tako-render/src/ffi.rs` +
+  `crates/tako-render/src/gl_renderer.rs` (raw GL/handle pointers). Scope every
+  relaxation with a module-level `#![allow(unsafe_code)]` — never relax at crate
+  or workspace level.
+- **The terminal backend is single-threaded by construction.** `Terminal` owns
+  raw pointers and is `!Send`; effects fire synchronously inside
+  `ghostty_terminal_vt_write` on the owning thread. Accordingly the
+  `tako-term::effects` callback types are intentionally **not** `Send`, and
+  `TerminalPanel` shares effect side-state via `Rc<RefCell<_>>` (not
+  `Arc<Mutex<_>>`). Don't add `Send` bounds or thread-spawning here without
+  reworking the ownership model.
+- **`tako-render` is split along the model/view seam.** `TerminalPanel`
+  (panel.rs) owns the terminal + PTY + OSC state — no font, no atlas. This is
+  what Phase 2's `tako-model` tree will own per-surface. `FramePlanner`
+  (frame_planner.rs) is a pure view: snapshot in, `FramePlan` out, no terminal
+  access — unit-testable without a shell. `Surface` (surface.rs) just
+  orchestrates the two plus the input encoders. The `extern "C"` ABI the C++
+  `QQuickFramebufferObject` calls lives entirely in `ffi.rs`. Keep new
+  terminal-core state in `TerminalPanel`, new rendering state in `FramePlanner`,
+  and new C entry points in `ffi.rs` — don't re-bloat `Surface` or scatter FFI
+  across modules.
 - **Qt is discovered via `qmake` on PATH.** `mise.toml` sets
   `QT_VERSION_MAJOR=6` so cxx-qt-build picks the Qt6 `qmake6`. Keep that env var
   when adding any Qt-linking crate.

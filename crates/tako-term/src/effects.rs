@@ -9,8 +9,12 @@
 //! ## Threading
 //!
 //! Callbacks fire on whatever thread calls `ghostty_terminal_vt_write`. The
-//! `Terminal` itself is single-threaded (not `Send`), so effects and the
-//! terminal share one thread by construction.
+//! `Terminal` itself is single-threaded (not `Send` — it owns raw pointers),
+//! so effects and the terminal share one thread by construction. The callback
+//! types below are intentionally **not** `Send`: the terminal can never cross
+//! threads, so pretending the closures could is dishonest and would force the
+//! embedder into `Arc<Mutex>` synchronization that nothing actually needs.
+//! Use `Rc<RefCell<_>>` (or a plain re-borrow) for shared effect state.
 //!
 //! ## Safety
 //!
@@ -43,8 +47,8 @@ pub struct SizeInfo {
 }
 
 /// Closure type that returns the current size info. Queried on demand by
-/// the `size` effect.
-pub type SizeCb = Box<dyn Fn() -> SizeInfo + Send>;
+/// the `size` effect. Not `Send` — see the crate threading note.
+pub type SizeCb = Box<dyn Fn() -> SizeInfo>;
 
 pub struct TerminalEffects {
     pub write_pty: Option<WritePtyCb>,
@@ -54,14 +58,14 @@ pub struct TerminalEffects {
     pub size: Option<SizeCb>,
 }
 
-/// Boxed `write_pty` callback.
-pub type WritePtyCb = Box<dyn FnMut(&[u8]) + Send>;
-/// Boxed `bell` callback.
-pub type BellCb = Box<dyn FnMut() + Send>;
-/// Boxed `title_changed` callback.
-pub type TitleChangedCb = Box<dyn FnMut() + Send>;
-/// Boxed `pwd_changed` callback.
-pub type PwdChangedCb = Box<dyn FnMut() + Send>;
+/// Boxed `write_pty` callback. Not `Send` (single-threaded terminal).
+pub type WritePtyCb = Box<dyn FnMut(&[u8])>;
+/// Boxed `bell` callback. Not `Send` (single-threaded terminal).
+pub type BellCb = Box<dyn FnMut()>;
+/// Boxed `title_changed` callback. Not `Send` (single-threaded terminal).
+pub type TitleChangedCb = Box<dyn FnMut()>;
+/// Boxed `pwd_changed` callback. Not `Send` (single-threaded terminal).
+pub type PwdChangedCb = Box<dyn FnMut()>;
 
 impl TerminalEffects {
     /// Build an empty effects set; register callbacks via the builder.
@@ -75,23 +79,23 @@ impl TerminalEffects {
         }
     }
 
-    pub fn with_write_pty<F: FnMut(&[u8]) + Send + 'static>(mut self, f: F) -> Self {
+    pub fn with_write_pty<F: FnMut(&[u8]) + 'static>(mut self, f: F) -> Self {
         self.write_pty = Some(Box::new(f));
         self
     }
-    pub fn with_bell<F: FnMut() + Send + 'static>(mut self, f: F) -> Self {
+    pub fn with_bell<F: FnMut() + 'static>(mut self, f: F) -> Self {
         self.bell = Some(Box::new(f));
         self
     }
-    pub fn with_title_changed<F: FnMut() + Send + 'static>(mut self, f: F) -> Self {
+    pub fn with_title_changed<F: FnMut() + 'static>(mut self, f: F) -> Self {
         self.title_changed = Some(Box::new(f));
         self
     }
-    pub fn with_pwd_changed<F: FnMut() + Send + 'static>(mut self, f: F) -> Self {
+    pub fn with_pwd_changed<F: FnMut() + 'static>(mut self, f: F) -> Self {
         self.pwd_changed = Some(Box::new(f));
         self
     }
-    pub fn with_size<F: Fn() -> SizeInfo + Send + Sync + 'static>(mut self, f: F) -> Self {
+    pub fn with_size<F: Fn() -> SizeInfo + 'static>(mut self, f: F) -> Self {
         self.size = Some(Box::new(f));
         self
     }
@@ -107,8 +111,8 @@ impl Default for TerminalEffects {
 //
 // `extern "C"` shims that libghostty calls. Each recovers the boxed
 // `TerminalEffects` from userdata and dispatches to the matching closure.
-// Send-safety: the box is only touched from the terminal's owning thread
-// (single-thread ownership of `Terminal`).
+// The box is only touched from the terminal's owning thread (single-thread
+// ownership of `Terminal`, enforced by `Terminal: !Send`).
 
 unsafe extern "C" fn trampoline_write_pty(
     _terminal: ffi::GhosttyTerminal,

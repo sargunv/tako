@@ -25,7 +25,7 @@ use std::os::raw::c_char;
 
 use glow::HasContext;
 
-use crate::surface::{FramePlan, Vertex};
+use crate::frame_planner::{FramePlan, Vertex};
 
 const VERTEX_SHADER_SRC: &str = r#"#version 110
 attribute vec2 a_pos;
@@ -380,93 +380,7 @@ impl Drop for GlRenderer {
 }
 
 /// C function-pointer type for resolving GL entry points. Matches
-/// `QOpenGLContext::getProcAddress`-style loaders.
+/// `QOpenGLContext::getProcAddress`-style loaders. Consumed by
+/// [`GlRenderer::ensure_gl`] and the `tako_gl_renderer_ensure_gl` C ABI in
+/// [`crate::ffi`].
 pub type LoaderFn = unsafe extern "C" fn(*const c_char, *mut c_void) -> *const c_void;
-
-// ---- C ABI for the C++ QQuickFramebufferObject::Renderer ----
-
-/// Construct a renderer without a GL context. Safe to call from the GUI
-/// thread. Use [`tako_gl_renderer_ensure_gl`] on the render thread to attach
-/// it to Qt's GL context.
-///
-/// # Safety
-///
-/// The caller owns the returned pointer and must free it with
-/// [`tako_gl_renderer_destroy`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_gl_renderer_new() -> *mut GlRenderer {
-    Box::into_raw(Box::new(GlRenderer::new()))
-}
-
-/// Free a renderer returned by [`tako_gl_renderer_new`]. No-op on null.
-///
-/// # Safety
-///
-/// `r` must be null or a pointer previously returned by
-/// [`tako_gl_renderer_new`], not already freed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_gl_renderer_destroy(r: *mut GlRenderer) {
-    if !r.is_null() {
-        drop(unsafe { Box::from_raw(r) });
-    }
-}
-
-/// Attach the renderer to the current thread's GL context. Idempotent. Must
-/// run on the render thread with Qt's `QOpenGLContext` current.
-///
-/// # Safety
-///
-/// `r` must be a valid [`GlRenderer`] pointer. `loader` must resolve symbols
-/// against the current GL context; `loader_userdata` is passed through
-/// verbatim to each `loader` call (typically the `QOpenGLContext*`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_gl_renderer_ensure_gl(
-    r: *mut GlRenderer,
-    loader: LoaderFn,
-    loader_userdata: *mut c_void,
-) {
-    if r.is_null() {
-        return;
-    }
-    let renderer = unsafe { &mut *r };
-    unsafe { renderer.ensure_gl(loader, loader_userdata) };
-}
-
-/// Copy a [`FramePlan`]'s borrowed data into the renderer's staging buffers.
-/// GUI thread. Must run before [`tako_gl_renderer_render`] each frame.
-///
-/// # Safety
-///
-/// `r` must be a valid [`GlRenderer`] pointer. `plan` must point to a valid
-/// [`FramePlan`] whose borrowed pointers are still live (i.e. before the next
-/// `tako_surface_tick`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_gl_renderer_ingest_plan(
-    r: *mut GlRenderer,
-    plan: *const FramePlan,
-    viewport_w: i32,
-    viewport_h: i32,
-) {
-    if r.is_null() || plan.is_null() {
-        return;
-    }
-    let renderer = unsafe { &mut *r };
-    let plan = unsafe { &*plan };
-    unsafe { renderer.ingest_plan(plan, viewport_w, viewport_h) };
-}
-
-/// Draw the latest staging data. Render thread, GL context current.
-///
-/// # Safety
-///
-/// `r` must be a valid [`GlRenderer`] pointer that has been attached to a GL
-/// context via [`tako_gl_renderer_ensure_gl`]. The GL context must be current
-/// on the calling thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tako_gl_renderer_render(r: *mut GlRenderer) {
-    if r.is_null() {
-        return;
-    }
-    let renderer = unsafe { &mut *r };
-    renderer.render();
-}

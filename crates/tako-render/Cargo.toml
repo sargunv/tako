@@ -20,9 +20,14 @@ freetype-rs = "0.38"
 # pointers are resolved through Qt's QOpenGLContext::getProcAddress loader.
 glow = "0.17"
 log = "0.4"
+# lru: bounds the shaped-grapheme cache so bursts of unique text (base64,
+# binary) can't grow it without limit. Glyph-id caches stay in plain HashMaps
+# since their keyspace is bounded by the font.
+lru = "0.12"
 png = "0.18"
 rustybuzz = "0.18"
 tako-term = { path = "../tako-term" }
+thiserror = "1.0"
 
 [lints]
 workspace = true
