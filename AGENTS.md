@@ -8,25 +8,18 @@ with libghostty-vt as the terminal core.
 ```
 tako/
 ├── crates/
-│   ├── tako-term/      libghostty-vt bindgen wrapper, PTY bridge, OSC dispatch
-│   ├── tako-render/    glyph atlas (freetype+rustybuzz) + QQuickItem RHI renderer
-│   ├── tako-model/     Window/Workspace/Split/Pane/Surface/Panel tree
-│   ├── tako-bonsplit/  binary split tree
-│   ├── tako-dbus/      D-Bus server + client (zbus)
-│   ├── tako-cli/       `tako` CLI -> D-Bus
-│   ├── tako-git/       gix branch/dirty/index + inotify; reqwest PR polling
-│   ├── tako-net/       procfs port scanner + per-workspace attribution
-│   ├── tako-notify/    OSC ingest + notification store + KNotification bridge
-│   ├── tako-hooks/     agent hook installers + state machine
-│   ├── tako-session/   serde snapshot to ~/.local/state/tako/ (XDG paths)
-│   ├── tako-config/    KConfig bridge + ghostty config reader + project JSON
-│   ├── tako-term/      libghostty-vt bindgen + link (build.rs fetches/builds)
+│   ├── tako-term/      libghostty-vt bindgen + link (build.rs fetches/builds); PTY bridge, OSC dispatch
+│   ├── tako-render/    glyph atlas (freetype+rustybuzz) + QQuickFramebufferObject GL renderer
 │   └── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
 ├── kcfg/               (future) takorc.kcfg schema + .kcfgc codegen
 ├── data/               (future) .desktop, metainfo, icons, D-Bus service file
 ├── ROADMAP.md          the authoritative design document
 └── cmux/               (gitignored) product reference checkout
 ```
+
+Crates for later phases (`tako-model`, `tako-bonsplit`, `tako-dbus`, `tako-cli`,
+`tako-git`, `tako-net`, `tako-notify`, `tako-hooks`, `tako-session`,
+`tako-config`) are created when their phase starts, not pre-scaffolded.
 
 See ROADMAP.md for the full architecture, data model, and phased roadmap.
 

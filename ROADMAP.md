@@ -106,16 +106,6 @@ tako/
 ├── crates/
 │   ├── tako-term/      # libghostty-vt bindgen wrapper, PTY bridge, OSC dispatch
 │   ├── tako-render/    # QQuickItem RHI terminal renderer (cxx-qt-exposed)
-│   ├── tako-model/     # Window/Workspace/Split/Pane/Surface/Panel tree (Rust-owned)
-│   ├── tako-bonsplit/  # Binary split tree (orientation + divider 0..1 + first/second)
-│   ├── tako-dbus/      # D-Bus server + client (zbus), session-bus service
-│   ├── tako-cli/       # `tako` binary (clap + serde_json) → D-Bus
-│   ├── tako-git/       # gix-based branch/dirty/index + inotify; reqwest PR polling
-│   ├── tako-net/       # procfs port scanner + per-workspace attribution
-│   ├── tako-notify/    # OSC ingest + notification store + KNotification bridge
-│   ├── tako-hooks/     # agent hook installers + hook-session store + state machine
-│   ├── tako-session/   # serde snapshot to ~/.local/state/tako/ (XDG paths)
-│   ├── tako-config/    # KConfig bridge + ghostty config reader + project JSON
 │   └── tako-app/       # cxx-qt bridge: registers Rust model to QML, main entry
 ├── qml/                # Sidebar, tabs, splits, notification panel, settings UI
 ├── kcfg/               # takorc.kcfg schema + .kcfgc codegen
@@ -124,6 +114,11 @@ tako/
                         # (currently lives in crates/tako-app; the workspace root
                         #  is a pure Cargo workspace manifest)
 ```
+
+Crates for later phases (`tako-model`, `tako-bonsplit`, `tako-dbus`, `tako-cli`,
+`tako-git`, `tako-net`, `tako-notify`, `tako-hooks`, `tako-session`,
+`tako-config`) are **created when their phase starts**, not pre-scaffolded — a
+workspace crate that contains no code is just noise.
 
 ---
 

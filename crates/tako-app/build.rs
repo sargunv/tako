@@ -41,7 +41,6 @@ fn main() {
             .cc_builder(|cc| {
                 cc.flag_if_supported("-Wno-sfinae-incomplete");
             })
-            .files(["src/qobject.rs"])
             .build();
     }
 }

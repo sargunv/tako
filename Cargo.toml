@@ -2,17 +2,7 @@
 resolver = "3"
 members = [
   "crates/tako-app",
-  "crates/tako-bonsplit",
-  "crates/tako-cli",
-  "crates/tako-config",
-  "crates/tako-dbus",
-  "crates/tako-git",
-  "crates/tako-hooks",
-  "crates/tako-model",
-  "crates/tako-net",
-  "crates/tako-notify",
   "crates/tako-render",
-  "crates/tako-session",
   "crates/tako-term",
 ]
 

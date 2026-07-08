@@ -56,51 +56,28 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-use ffi::{GhosttyBuildInfo, GhosttyResult, ghostty_build_info};
-
-/// Query a numeric `ghostty_build_info` field. Returns the result code and the
-/// out-value (unchanged on non-success). Used by the Phase 0 §2 smoke test to
-/// prove the bindgen + link path.
-pub fn build_info_usize(field: GhosttyBuildInfo) -> (GhosttyResult, usize) {
-    let mut value: usize = 0;
-    // SAFETY: `ghostty_build_info` with a numeric out-kind writes a `usize`
-    // (see ghostty/example/c-vt-build-info). The pointer is to a local.
-    let result =
-        unsafe { ghostty_build_info(field, &mut value as *mut usize as *mut core::ffi::c_void) };
-    (result, value)
-}
-
-/// libghostty-vt major version, or `None` if the build reports none.
-pub fn version_major() -> Option<usize> {
-    let (result, value) = build_info_usize(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MAJOR);
-    (result == ffi::GhosttyResult_GHOSTTY_SUCCESS).then_some(value)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod build_smoke {
+    use crate::ffi;
 
-    /// Phase 0 §2 smoke test: the bindgen bindings resolve and libghostty-vt.a
-    /// links. We assert the FFI call succeeds — the actual version depends on
-    /// the pinned ghostty build's injected metadata.
+    /// Phase 0 §2 smoke test: the bindgen bindings resolve, libghostty-vt.a
+    /// links, and `ghostty_build_info` succeeds. The actual version value
+    /// tracks the pinned ghostty commit's injected metadata (and may be 0 at
+    /// commits that haven't baked one in), so we assert success, not a value.
     #[test]
     fn ffi_links_and_build_info_succeeds() {
-        let (result, _) = build_info_usize(ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MAJOR);
+        let mut value: usize = 0;
+        // SAFETY: numeric out-kind writes a `usize` to the local out-pointer.
+        let result = unsafe {
+            ffi::ghostty_build_info(
+                ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MAJOR,
+                &mut value as *mut usize as *mut core::ffi::c_void,
+            )
+        };
         assert_eq!(
             result,
             ffi::GhosttyResult_GHOSTTY_SUCCESS,
             "ghostty_build_info call failed — libghostty-vt link is broken"
-        );
-    }
-
-    #[test]
-    fn version_major_is_reported() {
-        // A successful build should report a major version. We don't pin the
-        // exact value (it tracks the ghostty commit), only that it is set.
-        assert!(
-            version_major().is_some(),
-            "no version reported; got {:?}",
-            version_major()
         );
     }
 }

@@ -11,7 +11,7 @@ ApplicationWindow {
     width: 900
     height: 480
     visible: true
-    title: qsTr("Tako — Phase 1 P4 hidpi")
+    title: qsTr("Tako")
     color: palette.window
 
     // The live libghostty-vt terminal. Click to focus, then type.

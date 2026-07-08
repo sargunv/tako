@@ -15,7 +15,6 @@
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::raw::c_char;
 use std::process::Command;
 use std::ptr;
@@ -189,7 +188,7 @@ pub struct Surface {
     mouse_event: MouseEvent,
 
     /// Latest window title as observed by the host (C++ QML window title).
-    /// Read via [`Surface::take_host_events`] each tick.
+    /// Read via [`Surface::take_host_title`] each tick.
     host_title: Option<String>,
 }
 
@@ -342,7 +341,7 @@ impl Surface {
                 self.cell = self.font.cell_metrics();
             }
             Err(e) => {
-                eprintln!("[surface] font reload at dpr {dpr} (phys {physical_px}) failed: {e}");
+                log::warn!("font reload at dpr {dpr} (phys {physical_px}) failed: {e}");
                 return;
             }
         }
@@ -395,12 +394,10 @@ impl Surface {
         self.cols = cols;
         self.rows = rows;
         if let Err(e) = self.terminal.resize(cols, rows, cw, ch) {
-            eprintln!(
-                "[surface] terminal resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}"
-            );
+            log::warn!("terminal resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}");
         }
         if let Err(e) = self.pty.resize(cols, rows) {
-            eprintln!("[surface] pty resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}");
+            log::warn!("pty resize {old_cols}x{old_rows} → {cols}x{rows} failed: {e}");
         }
         // Keep the mouse encoder's size context in sync so coordinate mapping
         // (surface px → cell coords) stays correct.
@@ -523,8 +520,8 @@ impl Surface {
             && a.start.elapsed() >= a.delay
         {
             a.fired = true;
-            eprintln!(
-                "[tick] autorun firing: {:?}",
+            log::debug!(
+                "autorun firing: {:?}",
                 String::from_utf8_lossy(&a.cmd).trim()
             );
             let _ = self.pty.write(&a.cmd);
@@ -590,8 +587,8 @@ impl Surface {
         // Log slow frames (>5ms) or frames that ingested a lot of PTY bytes.
         // Both are signals that something is bound to output volume.
         if total_us > 5_000 || byte_count > 4_096 {
-            eprintln!(
-                "[tick] total={total_us}µs bytes={byte_count} drain={}µs vt={}µs snap={}µs plan={}µs verts={}",
+            log::debug!(
+                "tick total={total_us}µs bytes={byte_count} drain={}µs vt={}µs snap={}µs plan={}µs verts={}",
                 t_drain.duration_since(t0).as_micros(),
                 t_vt.duration_since(t_drain).as_micros(),
                 t_snap.duration_since(t_vt).as_micros(),
@@ -905,8 +902,8 @@ impl Surface {
 
         let build_total_us = t_quads.duration_since(t0).as_micros();
         if build_total_us > 5_000 {
-            eprintln!(
-                "[build_plan] total={build_total_us}µs unique={}µs (n={unique_count}) shape={}µs (atlas_rebuilt={atlas_rebuilt}, advance_n={}, raster_cache_n={}) verts={}µs (n={})",
+            log::debug!(
+                "build_plan total={build_total_us}µs unique={}µs (n={unique_count}) shape={}µs (atlas_rebuilt={atlas_rebuilt}, advance_n={}, raster_cache_n={}) verts={}µs (n={})",
                 t_unique.duration_since(t0).as_micros(),
                 t_shape.duration_since(t_unique).as_micros(),
                 self.glyph_advance.len(),
@@ -1011,7 +1008,7 @@ pub unsafe extern "C" fn tako_surface_new(
     match Surface::new(cols, rows, font.as_deref(), pixel_height, dpr) {
         Ok(s) => Box::into_raw(Box::new(s)),
         Err(e) => {
-            eprintln!("tako_surface_new failed: {e}");
+            log::error!("tako_surface_new failed: {e}");
             ptr::null_mut()
         }
     }
@@ -1269,10 +1266,4 @@ pub unsafe extern "C" fn tako_surface_take_title(
         *out_buf.add(bytes.len()) = 0;
     }
     bytes.len()
-}
-
-// Keep CString reachable for the FFI doc; avoids dead-code churn if unused.
-#[allow(dead_code)]
-fn _cstring_marker(s: &str) -> CString {
-    CString::new(s).unwrap()
 }

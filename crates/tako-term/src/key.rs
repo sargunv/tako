@@ -186,3 +186,28 @@ pub mod kitty {
     pub const ALL: u8 =
         DISAMBIGUATE | REPORT_EVENTS | REPORT_ALTERNATES | REPORT_ALL | REPORT_ASSOCIATED;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-check `mods::*` (hand-mirrored as `u16`) against the bindgen
+    /// `#define` constants (exposed as `u32`). Catches a desync if the table
+    /// is hand-edited or the ghostty pin is bumped and reorders the bits.
+    /// `modes.rs` is not cross-checkable here — its constants come from an
+    /// inline-fn macro bindgen can't evaluate, so there is no bindgen
+    /// source of truth to compare against.
+    #[test]
+    fn mods_match_bindgen_constants() {
+        assert_eq!(mods::SHIFT as u32, ffi::GHOSTTY_MODS_SHIFT);
+        assert_eq!(mods::CTRL as u32, ffi::GHOSTTY_MODS_CTRL);
+        assert_eq!(mods::ALT as u32, ffi::GHOSTTY_MODS_ALT);
+        assert_eq!(mods::SUPER as u32, ffi::GHOSTTY_MODS_SUPER);
+        assert_eq!(mods::CAPS_LOCK as u32, ffi::GHOSTTY_MODS_CAPS_LOCK);
+        assert_eq!(mods::NUM_LOCK as u32, ffi::GHOSTTY_MODS_NUM_LOCK);
+        assert_eq!(mods::SHIFT_SIDE as u32, ffi::GHOSTTY_MODS_SHIFT_SIDE);
+        assert_eq!(mods::CTRL_SIDE as u32, ffi::GHOSTTY_MODS_CTRL_SIDE);
+        assert_eq!(mods::ALT_SIDE as u32, ffi::GHOSTTY_MODS_ALT_SIDE);
+        assert_eq!(mods::SUPER_SIDE as u32, ffi::GHOSTTY_MODS_SUPER_SIDE);
+    }
+}

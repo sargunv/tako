@@ -266,18 +266,6 @@ unsafe extern "C" fn trampoline_color_scheme(
     true
 }
 
-// Keep an FFI symbol reference so dead-code linting doesn't flag the import
-// when only a subset of effects is registered.
-#[allow(dead_code)]
-fn _reference_fns() {
-    let _ = ffi::ghostty_terminal_set
-        as unsafe extern "C" fn(
-            ffi::GhosttyTerminal,
-            ffi::GhosttyTerminalOption,
-            *const c_void,
-        ) -> ffi::GhosttyResult;
-}
-
 /// Register callbacks on an already-created terminal. The caller MUST follow
 /// this with [`free_effects`] before [`ffi::ghostty_terminal_free`] — typically
 /// by stashing the returned pointer inside the owning `Terminal` so its
