@@ -10,6 +10,7 @@
 use std::time::{Duration, Instant};
 
 use tako_term::input as vt_input;
+use tako_term::key;
 use tako_term::key::{KeyEncoder, KeyEvent};
 use tako_term::modes;
 use tako_term::mouse::{MouseEncoder, MouseEvent};
@@ -162,7 +163,33 @@ impl Surface {
         self.key_event.set_key(key);
         self.key_event.set_mods(mods);
         self.key_event.set_consumed_mods(consumed_mods);
+
+        // Set the unshifted codepoint from the logical key. This lets the
+        // encoder correctly handle Caps Lock + Ctrl combos and derive the
+        // right C0 byte when no UTF-8 text is supplied (e.g. Ctrl+C → \x03).
+        self.key_event
+            .set_unshifted_codepoint(key::unshifted_codepoint(key));
+
+        // Strip C0 control characters (U+0000–U+001F, U+007F) from the UTF-8
+        // text. The encoder contract (key/event.h:430–440) says: "Do not pass
+        // C0 control characters … pass NULL instead and let the encoder use
+        // the logical key." Qt's QKeyEvent::text() returns these control
+        // characters for Ctrl+letter combos (e.g. "\x03" for Ctrl+C), which
+        // would make the encoder emit CSI u sequences (CSI 3;5u) instead of
+        // the expected single-byte C0 controls (\x03).
+        //
+        // In UTF-8, C0 controls and DEL are always single bytes (< 0x20 or
+        // 0x7F), so checking each byte is sufficient — multi-byte sequences
+        // never contain bytes below 0x80.
+        let text = text.and_then(|bytes| {
+            if bytes.iter().any(|&b| b < 0x20 || b == 0x7F) {
+                None
+            } else {
+                Some(bytes)
+            }
+        });
         self.key_event.set_utf8(text);
+
         let bytes = self
             .key_encoder
             .encode(self.panel.terminal(), &self.key_event);
