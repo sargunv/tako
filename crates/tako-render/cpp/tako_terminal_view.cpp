@@ -91,21 +91,12 @@ TakoTerminalView::~TakoTerminalView() {
 
 void TakoTerminalView::pumpAndRender() {
     if (!m_surface) return;
-    // Reconcile the grid to the current item geometry. The surface was created
-    // in the constructor at a placeholder 80×24 (width()/height() were 0 then),
-    // and the initial QML layout doesn't reliably arrive as a geometryChange
-    // before the first paints — so pull the size here, every tick.
-    // `tako_surface_resize_pixels` short-circuits when cols/rows are unchanged,
-    // so this is a cheap no-op once the grid matches.
-    if (width() >= 1.0 && height() >= 1.0) {
-        const float dpr = windowDpr();
-        tako_surface_resize_pixels(
-            m_surface, static_cast<uint32_t>(width() * dpr),
-            static_cast<uint32_t>(height() * dpr));
-    }
     // Clear any pending wake bytes so the level-triggered notifier settles,
     // then advance the terminal. tick() reports whether a new frame was
     // actually produced; if not, skip update() and the GPU stays idle.
+    // (Sizing is event-driven via geometryChange + onDprChanged — no polling
+    // here. A DPR change forces a replan inside tick even though cols/rows are
+    // unchanged, so the GL viewport refreshes.)
     tako_surface_drain_notify(m_surface);
     if (tako_surface_tick(m_surface, &m_plan)) {
         flushHostTitle();
@@ -131,25 +122,32 @@ void TakoTerminalView::onDprChanged() {
                                    static_cast<uint32_t>(width() * dpr),
                                    static_cast<uint32_t>(height() * dpr));
     }
+    // Re-render immediately: set_dpr reloaded the font (new glyph metrics) and
+    // set a forced-replan flag inside the surface, so pump now to rebuild the
+    // plan and refresh the GL viewport without waiting for the safety timer.
+    pumpAndRender();
 }
 
 void TakoTerminalView::itemChange(ItemChange change, const ItemChangeData &value) {
     QQuickFramebufferObject::itemChange(change, value);
-    // When the item joins a window, wire the screenChanged signal so DPR
-    // transitions (window dragged between monitors) reload the font at the new
-    // physical size. We connect once and guard with m_dprSignalConnected.
+    // The authoritative "DPR changed" hook. On Wayland with fractional scaling,
+    // the window is created with the integer DPR (e.g. 2) and the compositor's
+    // preferred fractional scale (e.g. 1.7) arrives later as a
+    // wp_fractional_scale preferred_scale event — Qt surfaces that here, as
+    // ItemDevicePixelRatioHasChanged carrying value.realValue. Re-checking on
+    // activeFocusItemChanged (the old hack) only caught it incidentally and
+    // raced differently per monitor.
+    if (change == ItemDevicePixelRatioHasChanged) {
+        onDprChanged();
+        return;
+    }
     if (change == ItemSceneChange && value.window && !m_dprSignalConnected) {
         m_dprSignalConnected = true;
+        // Monitor switches (window dragged to a different screen) come through
+        // screenChanged; ItemDevicePixelRatioChanged above covers fractional
+        // arrivals on the same screen.
         connect(value.window, &QQuickWindow::screenChanged, this,
                 [this](QScreen *) { onDprChanged(); });
-        connect(value.window, &QQuickWindow::activeFocusItemChanged, this,
-                [this] {
-                    // Some platforms fire DPR changes without screenChanged;
-                    // activeFocusItemChanged is a cheap moment to re-check.
-                    onDprChanged();
-                });
-        // The surface may have been created (ensureSurface) before the window
-        // was attached, with a fallback DPR of 1.0. Re-check now.
         onDprChanged();
     }
 }

@@ -39,6 +39,13 @@ pub struct Surface {
     /// pointers stay valid as long as the planner doesn't rebuild — which only
     /// happens on a non-idle tick.
     last_plan: FramePlan,
+    /// Set whenever *view* state changes in a way `snap.dirty` can't observe —
+    /// currently just a DPR/font reload (`set_dpr`): the terminal content is
+    /// unchanged (so the render-state dirty flag stays false and cols/rows are
+    /// unchanged, making `resize_to_pixels` a no-op) but the glyphs, atlas, and
+    /// the GL viewport all need a rebuild + `update()` or the host renders the
+    /// new big glyphs into the stale small viewport. Cleared after `build_plan`.
+    needs_replan: bool,
 }
 
 /// Optional one-shot command injected into the PTY shortly after spawn. Driven
@@ -79,6 +86,7 @@ impl Surface {
             autorun: build_autorun(),
             dpr,
             last_plan: FramePlan::default(),
+            needs_replan: true,
         })
     }
 
@@ -106,6 +114,11 @@ impl Surface {
         let cell = self.planner.set_dpr(dpr);
         // Refresh the size-query snapshot with the new cell metrics.
         self.panel.set_cell_metrics(cell);
+        // Force a replan even though terminal content (and thus cols/rows)
+        // is unchanged: the font, atlas, and GL viewport all changed, and
+        // without this the idle-skip would suppress `update()` and the host
+        // would render new big glyphs into the stale viewport.
+        self.needs_replan = true;
     }
 
     /// Resize the terminal grid to fit `width_px × height_px` physical pixels.
@@ -265,14 +278,13 @@ impl Surface {
         let t_pump = Instant::now();
         let snap = self.panel.capture_frame();
 
-        // ghostty's dirty flag is the authoritative "did the screen change
-        // since the last capture" signal — but it's only meaningful AFTER
-        // `render_state_update`, which runs inside `capture_frame`. So we must
-        // capture first, then decide. (Always-capturing is cheap — a row walk
-        // — and idle ticks are rare now that the notifier drives them; when
-        // nothing changed we skip the plan rebuild and tell the caller to skip
-        // `update()`, so the GPU stays idle.)
-        if snap.dirty == Dirty::False {
+        // Rebuild iff the terminal content changed (`snap.dirty`) OR view state
+        // changed (`needs_replan` — a DPR/font reload). The terminal's dirty
+        // flag is authoritative for content, set by `render_state_update`
+        // inside `capture_frame`; `needs_replan` covers font/atlas/viewport
+        // changes that don't touch terminal content. When neither holds, skip
+        // the plan rebuild and tell the caller to skip `update()` (GPU idle).
+        if snap.dirty == Dirty::False && !self.needs_replan {
             return (self.last_plan, false);
         }
 
@@ -280,6 +292,7 @@ impl Surface {
         let plan = self.planner.build_plan(&snap);
         let t_plan = Instant::now();
         self.panel.clear_dirty();
+        self.needs_replan = false;
         self.last_plan = plan;
 
         let total_us = t_plan.duration_since(t0).as_micros();

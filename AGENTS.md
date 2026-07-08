@@ -139,3 +139,18 @@ required.
   by `StreamingPty` for its whole lifetime so the read end never sees EOF (which
   would busy-loop the level-triggered notifier) until teardown. If the pipe
   can't be created, `notify_fd` returns -1 and the timer alone drives ticks.
+- **Wayland fractional DPR is delivered late; react to
+  `ItemDevicePixelRatioHasChanged`.** A window is created with the integer DPR
+  (e.g. 2) and the compositor's preferred fractional scale (e.g. 1.7) arrives
+  asynchronously as a `wp_fractional_scale` preferred_scale event. Qt surfaces
+  it as `QQuickItem::itemChange(ItemDevicePixelRatioHasChanged,
+  {realValue})`
+  — _not_ via `screenChanged` (which only fires on a monitor switch) and _not_
+  via `activeFocusItemChanged` (which catches it incidentally and races
+  per-monitor, leaving the terminal rendered at the wrong size).
+  `Surface::set_dpr` sets a `needs_replan` flag because a DPR change reloads the
+  font + GL viewport but doesn't dirty the terminal content nor change cols/rows
+  — without it the idle-skip would suppress `update()` and the host would draw
+  new big glyphs into the stale viewport. (General rule: the idle-skip's "did
+  anything change" signal must cover every state the plan/viewport depend on,
+  not just terminal content.)
