@@ -63,7 +63,7 @@ pub enum CursorStyle {
 }
 
 /// Cursor state from the render state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {
     pub visible: bool,
     /// `Some((x, y))` when the cursor is within the viewport, in cell coords.

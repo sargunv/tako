@@ -14,7 +14,7 @@ use tako_term::key;
 use tako_term::key::{KeyEncoder, KeyEvent};
 use tako_term::modes;
 use tako_term::mouse::{MouseEncoder, MouseEvent};
-use tako_term::snapshot::Dirty;
+use tako_term::snapshot::{Cursor, Dirty};
 
 use crate::Error;
 use crate::font::CellMetrics;
@@ -47,6 +47,9 @@ pub struct Surface {
     /// the GL viewport all need a rebuild + `update()` or the host renders the
     /// new big glyphs into the stale small viewport. Cleared after `build_plan`.
     needs_replan: bool,
+    /// Last rendered cursor state. libghostty-vt can report `Dirty::False` for
+    /// cursor-only movement, so cursor changes are tracked separately.
+    last_cursor: Option<Cursor>,
 }
 
 /// Optional one-shot command injected into the PTY shortly after spawn. Driven
@@ -88,6 +91,7 @@ impl Surface {
             dpr,
             last_plan: FramePlan::default(),
             needs_replan: true,
+            last_cursor: None,
         })
     }
 
@@ -305,13 +309,14 @@ impl Surface {
         let t_pump = Instant::now();
         let snap = self.panel.capture_frame();
 
-        // Rebuild iff the terminal content changed (`snap.dirty`) OR view state
-        // changed (`needs_replan` — a DPR/font reload). The terminal's dirty
-        // flag is authoritative for content, set by `render_state_update`
-        // inside `capture_frame`; `needs_replan` covers font/atlas/viewport
-        // changes that don't touch terminal content. When neither holds, skip
-        // the plan rebuild and tell the caller to skip `update()` (GPU idle).
-        if snap.dirty == Dirty::False && !self.needs_replan {
+        let cursor_changed = self.last_cursor.as_ref() != Some(&snap.cursor);
+
+        // Rebuild iff terminal content changed (`snap.dirty`), cursor state
+        // changed, or view state changed (`needs_replan` — a DPR/font reload).
+        // libghostty-vt can report Dirty::False for cursor-only movement, so
+        // cursor is tracked outside the dirty bit to keep shell line editing
+        // visually responsive without giving up idle GPU skips.
+        if snap.dirty == Dirty::False && !cursor_changed && !self.needs_replan {
             return (self.last_plan, false);
         }
 
@@ -320,6 +325,7 @@ impl Surface {
         let t_plan = Instant::now();
         self.panel.clear_dirty();
         self.needs_replan = false;
+        self.last_cursor = Some(snap.cursor.clone());
         self.last_plan = plan;
 
         let total_us = t_plan.duration_since(t0).as_micros();

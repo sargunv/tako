@@ -372,6 +372,75 @@ mod tests {
         assert_eq!(bytes, &[0x04], "Ctrl+D should produce EOT (\\x04)");
     }
 
+    #[test]
+    fn arrow_left_defaults_to_normal_cursor_sequence() {
+        let mut encoder = KeyEncoder::new().expect("encoder");
+        let mut event = KeyEvent::new().expect("event");
+        let terminal = crate::terminal::Terminal::new(80, 24, 0).expect("terminal");
+
+        event.set_action(ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS);
+        event.set_key(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_LEFT);
+        event.set_mods(0);
+        event.set_consumed_mods(0);
+        event.set_utf8(None);
+        event.set_unshifted_codepoint(0);
+
+        let bytes = encoder.encode(&terminal, &event);
+        assert_eq!(bytes, b"\x1b[D");
+    }
+
+    #[test]
+    fn arrow_left_uses_application_cursor_sequence_after_smkx() {
+        let mut encoder = KeyEncoder::new().expect("encoder");
+        let mut event = KeyEvent::new().expect("event");
+        let mut terminal = crate::terminal::Terminal::new(80, 24, 0).expect("terminal");
+        terminal.vt_write(b"\x1b[?1h\x1b=");
+
+        event.set_action(ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS);
+        event.set_key(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_LEFT);
+        event.set_mods(0);
+        event.set_consumed_mods(0);
+        event.set_utf8(None);
+        event.set_unshifted_codepoint(0);
+
+        let bytes = encoder.encode(&terminal, &event);
+        assert_eq!(bytes, b"\x1bOD");
+    }
+
+    #[test]
+    fn ctrl_arrow_left_keeps_ctrl_as_terminal_modifier() {
+        let mut encoder = KeyEncoder::new().expect("encoder");
+        let mut event = KeyEvent::new().expect("event");
+        let terminal = crate::terminal::Terminal::new(80, 24, 0).expect("terminal");
+
+        event.set_action(ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS);
+        event.set_key(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_LEFT);
+        event.set_mods(mods::CTRL);
+        event.set_consumed_mods(0);
+        event.set_utf8(None);
+        event.set_unshifted_codepoint(0);
+
+        let bytes = encoder.encode(&terminal, &event);
+        assert_eq!(bytes, b"\x1b[1;5D");
+    }
+
+    #[test]
+    fn arrow_left_ignores_num_lock_modifier_for_navigation_sequence() {
+        let mut encoder = KeyEncoder::new().expect("encoder");
+        let mut event = KeyEvent::new().expect("event");
+        let terminal = crate::terminal::Terminal::new(80, 24, 0).expect("terminal");
+
+        event.set_action(ffi::GhosttyKeyAction_GHOSTTY_KEY_ACTION_PRESS);
+        event.set_key(ffi::GhosttyKey_GHOSTTY_KEY_ARROW_LEFT);
+        event.set_mods(mods::NUM_LOCK);
+        event.set_consumed_mods(0);
+        event.set_utf8(None);
+        event.set_unshifted_codepoint(0);
+
+        let bytes = encoder.encode(&terminal, &event);
+        assert_eq!(bytes, b"\x1b[D");
+    }
+
     /// Verify the bug: if we DON'T strip the control char and pass "\x03" as
     /// UTF-8 text, the encoder produces the wrong CSI u sequence. This test
     /// documents the buggy behavior so the fix's rationale is clear.

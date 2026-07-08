@@ -87,3 +87,36 @@ fn cursor_is_visible_after_writes() {
     assert_eq!(cx, 2, "cursor column after 'ab' should be 2");
     assert_eq!(cy, 0, "cursor row should be 0");
 }
+
+#[test]
+fn csi_cursor_left_moves_visible_cursor() {
+    let (mut t, mut rs) = fresh_terminal();
+    t.vt_write(b"abc\x1b[D");
+
+    let snap = FrameSnapshot::capture(&mut t, &mut rs);
+    let (cx, cy) = snap
+        .cursor
+        .viewport
+        .expect("cursor should be in viewport after CUB");
+    assert_eq!(cx, 2, "cursor column after CUB should move left");
+    assert_eq!(cy, 0, "cursor row should not change");
+    assert_eq!(row_text(&snap.rows_data[0]), "abc");
+}
+
+#[test]
+fn cursor_only_move_updates_snapshot_even_when_not_dirty() {
+    let (mut t, mut rs) = fresh_terminal();
+    t.vt_write(b"abc");
+    let _ = FrameSnapshot::capture(&mut t, &mut rs);
+    rs.clear_dirty().expect("clear_dirty");
+
+    t.vt_write(b"\x1b[D");
+    let snap = FrameSnapshot::capture(&mut t, &mut rs);
+
+    assert_eq!(
+        snap.dirty,
+        Dirty::False,
+        "libghostty-vt does not mark cursor-only moves dirty"
+    );
+    assert_eq!(snap.cursor.viewport, Some((2, 0)));
+}

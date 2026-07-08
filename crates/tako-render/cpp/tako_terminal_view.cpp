@@ -223,6 +223,14 @@ uint16_t qt_mods_to_ghostty(Qt::KeyboardModifiers q) {
     return m;
 }
 
+uint16_t qt_consumed_mods_to_ghostty(const QKeyEvent *e) {
+    // consumed_mods are modifiers Qt used to produce text, not modifiers the
+    // terminal program should see. Ctrl/Alt/Super must remain visible so
+    // navigation keys encode as CSI 1;5D, CSI 1;3D, etc.
+    if (e->text().isEmpty()) return 0;
+    return (e->modifiers() & Qt::ShiftModifier) ? GHOSTTY_MODS_SHIFT : 0;
+}
+
 // Translate Qt::Key to GhosttyKey (W3C UI Events physical codes). Returns
 // GHOSTTY_KEY_UNIDENTIFIED for keys we don't map yet.
 GhosttyKey qt_key_to_ghostty(int key) {
@@ -516,7 +524,7 @@ void TakoTerminalView::keyPressEvent(QKeyEvent *e) {
     }
 
     const uint16_t mods = qt_mods_to_ghostty(e->modifiers());
-    const uint16_t consumed_mods = mods;  // we let the encoder decide.
+    const uint16_t consumed_mods = qt_consumed_mods_to_ghostty(e);
 
     // UTF-8 text the key produced. The encoder strips C0 controls for us.
     const QString text = e->text();
@@ -553,7 +561,7 @@ void TakoTerminalView::keyReleaseEvent(QKeyEvent *e) {
     }
     const uint16_t mods = qt_mods_to_ghostty(e->modifiers());
     tako_surface_key_event(m_surface, GHOSTTY_KEY_ACTION_RELEASE,
-                           static_cast<uint32_t>(key), mods, mods,
+                           static_cast<uint32_t>(key), mods, 0,
                            nullptr, 0);
     e->accept();
 }
