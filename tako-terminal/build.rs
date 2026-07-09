@@ -43,6 +43,23 @@ fn main() {
         "cargo:rerun-if-changed={}",
         terminal_src.join("core.zig").display()
     );
+    for src in [
+        "common.zig",
+        "font.zig",
+        "atlas.zig",
+        "pty.zig",
+        "session.zig",
+        "snapshot.zig",
+        "frame.zig",
+        "input.zig",
+        "selection.zig",
+        "tests.zig",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            terminal_src.join(src).display()
+        );
+    }
     println!(
         "cargo:rerun-if-changed={}",
         terminal_src.join("tako_terminal_core.h").display()

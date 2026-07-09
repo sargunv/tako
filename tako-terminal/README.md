@@ -168,16 +168,32 @@ Current files:
 - `tako_terminal_backend.h`: private Zig implementation structs for resolved
   font creation options, cell metrics, frame snapshots, shaped text runs, and
   rasterized glyph bitmaps. The C++ facade must not include it.
-- `core.zig`: implementation-core shim. It owns the live libghostty-vt terminal,
-  effects callbacks, PTY/session lifecycle, keyboard/focus/paste/mouse-event
-  encoding, scrollback viewport navigation, resolved font-path selection,
-  scrollbar state, hyperlink hit-testing, BEL coalescing, and direct
-  libghostty-vt mode/data queries, including OSC title/current-directory
-  readout, viewport geometry, pointer selection gestures/autoscroll, keyboard
-  selection adjustment, select-all/semantic selection derives, DEC 2026
-  synchronized-output gating, and selection formatting/copy-out. Move real
-  terminal responsibilities here without changing the facade API.
-- `core.zig` also carries the terminal-core integration tests.
-  `cargo test -p
-  tako-terminal` runs `zig test` through the Rust shim so the
-  normal workspace test command covers the Zig implementation.
+- `core.zig`: implementation-core composition root and C ABI surface. It is the
+  `zig build-obj` entry, owns the cross-cutting session lifecycle orchestrators
+  (`session_new`/`destroy`/`tick`/`resize`), and defines every
+  `pub export fn
+  tako_terminal_*` as a thin wrapper over the implementation
+  modules. Move real terminal responsibilities into the modules below without
+  changing the facade API.
+- `common.zig`: the single `@cImport` site (ghostty/ft/hb/core_abi/backend/c),
+  ABI type aliases, shared value types (`CursorState`, `MouseGeometry`, …), mode
+  constants, and pure helpers (color resolution, selection predicates, env
+  access). A leaf imported by every other module.
+- `font.zig`: FreeType/HarfBuzz `FontCore`, shape cache, font-family/path
+  resolution, cell metrics, and the `fontCore*` wrappers.
+- `atlas.zig`: `OwnedGlyphAtlas` glyph packing/atlas.
+- `pty.zig`: `PtySession`, shell integration scripts, and spawn.
+- `session.zig`: `TerminalSession` struct, libghostty effects/callbacks, and
+  session state accessors/mutators.
+- `snapshot.zig`: render-state helpers and render-state→backend frame snapshot
+  capture.
+- `frame.zig`: `FramePlan` finalization, vertex assembly, and cursor
+  presentation.
+- `input.zig`: key/mouse encoding.
+- `selection.zig`: selection gestures, grid refs, hyperlinks, selection
+  formatting, and scrollback viewport navigation.
+- `tests.zig`: terminal-core integration tests (`TestSession` + test blocks). It
+  is the `zig test` entry. `cargo test -p tako-terminal` runs
+  `zig test
+  tests.zig` through the Rust shim so the normal workspace test
+  command covers the Zig implementation.

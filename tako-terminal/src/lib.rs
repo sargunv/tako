@@ -3,7 +3,7 @@
 //! This crate is the Rust-side packaging shim for the C++/Zig `TerminalView`
 //! component while Cargo still builds the Tako app. The app consumes this crate
 //! only for linkage and one-time QML type registration; terminal behavior lives
-//! in `tako_terminal_view.*` and `core.zig`.
+//! in `tako_terminal_view.*` and the `*.zig` implementation core.
 
 #![allow(unsafe_code)]
 
@@ -31,11 +31,11 @@ mod tests {
         let terminal_src = env!("TAKO_TERMINAL_SRC");
         let ghostty_include = env!("TAKO_GHOSTTY_INCLUDE");
         let ghostty_lib_dir = env!("TAKO_GHOSTTY_LIB_DIR");
-        let core_zig = Path::new(terminal_src).join("core.zig");
+        let tests_zig = Path::new(terminal_src).join("tests.zig");
 
         let mut cmd = Command::new("zig");
         cmd.arg("test")
-            .arg(&core_zig)
+            .arg(&tests_zig)
             .arg("-lc")
             .arg("-I")
             .arg(ghostty_include)
@@ -56,7 +56,7 @@ mod tests {
         assert!(
             status.success(),
             "zig test failed for {}",
-            core_zig.display()
+            tests_zig.display()
         );
     }
 
