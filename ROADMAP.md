@@ -22,7 +22,8 @@ notified only when an agent actually needs them.
   X11, `.desktop`/metainfo packaging. Idiomatic KDE behavior over
   cmux-feature-parity.
 - **Fast, modern terminal.** libghostty-vt for VT fidelity; GPU rendering via Qt
-  Quick RHI; reads `~/.config/ghostty/config` for themes/fonts/colors.
+  Quick RHI; terminal appearance is driven by app-owned settings through the
+  `TerminalView` property API.
 - **cmux-style UI layout.** Vertical sidebar (workspaces) + horizontal tab bar
   (surfaces inside panes) + binary split tree (panes). Per-row metadata: cwd,
   git branch + dirty dot, listening ports, latest notification text.
@@ -131,10 +132,12 @@ positioning, cursor quads, and frame metadata finalization live in Zig. Keep the
 Qt/QML API stable and move implementation work behind `tako_terminal_core.h`
 rather than changing `tako-app`.
 
-Config is app/model-owned, not terminal-owned. `tako-config` loads Tako/Ghostty
-style terminal defaults and `tako-app` passes them to `TerminalView` through
-normal Qt properties before QML loads. The embeddable terminal component should
-not read user dotfiles itself.
+Configuration is app/model-owned, not terminal-owned. `TerminalView` exposes
+normal Qt properties for terminal defaults (font, colors, palette, cursor,
+scrollback, shell bootstrap), and `tako-app` binds app settings to those
+properties. Until the app settings model exists, the demo shell hardcodes
+reasonable defaults in QML. The embeddable terminal component must not read user
+dotfiles itself.
 
 cxx-qt is still the right bridge for Rust-owned Qt models and QML-facing app
 objects, but not for the terminal facade. `TerminalView` needs protected Qt
@@ -184,7 +187,6 @@ tako/
 ├── tako-terminal/      # embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── crates/
 │   ├── tako-app/       # Rust app model + cxx-qt/QML host; depends on tako-terminal
-│   ├── tako-config/    # startup terminal defaults parser
 ├── qml/                # Sidebar, tabs, splits, notification panel, settings UI
 ├── kcfg/               # takorc.kcfg schema + .kcfgc codegen
 ├── data/               # .desktop, metainfo, icons, D-Bus service file
@@ -194,9 +196,9 @@ tako/
 ```
 
 Crates for later phases (`tako-model`, `tako-bonsplit`, `tako-dbus`, `tako-cli`,
-`tako-git`, `tako-net`, `tako-notify`, `tako-hooks`, `tako-session`,
-`tako-config`) are **created when their phase starts**, not pre-scaffolded — a
-workspace crate that contains no code is just noise.
+`tako-git`, `tako-net`, `tako-notify`, `tako-hooks`, `tako-session`, settings
+support crates if needed) are **created when their phase starts**, not
+pre-scaffolded — a workspace crate that contains no code is just noise.
 
 ---
 
@@ -656,13 +658,13 @@ pre-build it.
   generated `Tako::Settings` class exposed to Rust via cxx-qt. Cascading
   defaults, change notifications, integrates with KDE System Settings if you
   ship a KCM. Stored at `~/.config/takorc`.
+- **Terminal settings**: part of the app settings model, not a separate
+  terminal-side config. The app binds settings to `TerminalView` properties; the
+  embeddable terminal component remains config-file-agnostic.
 - **Project-scoped settings**: JSON at `.tako/tako.json` (and parent
   directories, merged). Agent-editable, portable, KDE-independent. Defines
   custom commands, workspace templates, notification hooks, env. Mirrors cmux's
   `.cmux/cmux.json`.
-- **Ghostty compat**: read `~/.config/ghostty/config` for theme/font/colors/
-  cursor. Tako writes managed additions to `~/.config/tako/config.ghostty`,
-  never to the user's ghostty config.
 
 ---
 
@@ -788,12 +790,10 @@ Subtasks (✓ = landed in this repo):
       loading so plugin managers see their expected config directory. Future
       packaging can expose the same scripts as a persistent installer, but Phase
       1 dogfood no longer depends on manual dotfile edits.
-- [x] **Config (`tako-config`, startup slice):** parses `TAKO_CONFIG` or
-      `$XDG_CONFIG_HOME/{ghostty,tako}/config` /
-      `~/.config/{ghostty,tako}/config` for font family/size, palette,
-      fg/bg/cursor, scrollback limit, cursor style, and cursor blink; `tako-app`
-      applies those as initial QML root properties bound to `TerminalView`. Full
-      KConfigXT settings UI/reload remains a later app-shell task.
+- [x] **Terminal defaults:** `TerminalView` exposes property-driven defaults for
+      font size, palette/colors, cursor, scrollback, and session bootstrap;
+      `tako-app` currently hardcodes a small set of reasonable defaults in QML.
+      Full KConfigXT settings UI/reload remains a later app-shell task.
 - [x] **Deliverable (partial):** a usable native terminal. Dogfood daily. Core
       selection + clipboard landed; the remaining deferred gap before this is
       fully ticked is OSC 52 clipboard, pending an upstreamable/public

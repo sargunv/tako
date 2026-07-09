@@ -8,8 +8,7 @@ with libghostty-vt as the terminal core.
 ```
 tako/
 ├── crates/
-│   ├── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
-│   └── tako-config/    startup terminal defaults parser (Tako/Ghostty-style config)
+│   └── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
 ├── tako-terminal/      embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── kcfg/               (future) takorc.kcfg schema + .kcfgc codegen
 ├── data/               (future) .desktop, metainfo, icons, D-Bus service file
@@ -112,11 +111,12 @@ cell metrics, atlas packing, and render-frame planning in production.
   libghostty-vt. Palette config is all-or-reset, matching libghostty-vt's
   256-entry default palette API. `scrollbackLimit` is creation-time config and
   only applies to new/restarted sessions.
-- **Config is app/model-owned, not terminal-owned.** `tako-config` parses
-  startup terminal defaults from `TAKO_CONFIG`, then Ghostty and Tako config
-  files under XDG config home. `tako-app` passes those values to QML as initial
-  root properties bound to `TerminalView`. Keep `TerminalView` embeddable and
-  property-driven; do not make `tako-terminal` read user dotfiles directly.
+- **Config is app/model-owned, not terminal-owned.** Terminal defaults are
+  supplied to `TerminalView` through normal Qt properties. For now `tako-app`
+  hardcodes reasonable defaults in QML; later app settings should be KDE
+  settings (`KConfig`/`KConfigXT`), not a separate terminal-side config. Keep
+  `TerminalView` embeddable and property-driven; do not make `tako-terminal`
+  read user dotfiles directly.
 - **Shell integration is spawn-time bootstrap, not parser logic.**
   `TerminalView` exposes creation-time `shellIntegration` (default true). The
   Zig implementation core creates per-session temporary startup files for bash/

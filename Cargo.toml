@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
   "crates/tako-app",
-  "crates/tako-config",
   "tako-terminal",
 ]
 

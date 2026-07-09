@@ -792,15 +792,7 @@ dependencies = [
  "cxx-qt-lib",
  "env_logger",
  "log",
- "tako-config",
  "tako-terminal",
-]
-
-[[package]]
-name = "tako-config"
-version = "0.1.0"
-dependencies = [
- "log",
 ]
 
 [[package]]

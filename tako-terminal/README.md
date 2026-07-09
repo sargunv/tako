@@ -25,10 +25,10 @@ The app should treat this like any other Qt component. `tako-app` may bind to Qt
 properties, connect signals, and call invokables, but it should not reach
 through to implementation-core details.
 
-Configuration loading belongs to the embedding application. For Tako, the Rust
-app loads user config with `tako-config` and binds the resulting values to
-`TerminalView` properties before session start; the terminal component itself
-does not read dotfiles.
+Configuration loading belongs to the embedding application. For Tako, app
+settings will eventually bind to `TerminalView` properties; for now the demo QML
+hardcodes a small set of defaults. The terminal component itself does not read
+dotfiles.
 
 ## TerminalView API
 

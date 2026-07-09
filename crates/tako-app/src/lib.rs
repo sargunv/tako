@@ -2,8 +2,6 @@
 //!
 //! See ROADMAP.md §2.3 and the Phase 0 spike (§12).
 
-mod settings;
-
 use cxx_qt::casting::Upcast;
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QUrl};
 use std::pin::Pin;
@@ -22,9 +20,7 @@ pub fn run() {
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
 
-    if let Some(mut engine) = engine.as_mut() {
-        let properties = settings::initial_properties();
-        engine.as_mut().set_initial_properties(&properties);
+    if let Some(engine) = engine.as_mut() {
         engine.load(&QUrl::from("qrc:/qt/qml/org/tako/qml/main.qml"));
     }
 
