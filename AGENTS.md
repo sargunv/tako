@@ -51,6 +51,9 @@ cell metrics, atlas packing, and render-frame planning in production.
 
 <!-- List non-negotiable rules for the project as they emerge. -->
 
+- **All UI must confirm to the KDE Human Interface Guidelines.** Research
+  https://develop.kde.org/hig/ before adding or changing UI components, copy, or
+  icons.
 - **`unsafe_code` is denied workspace-wide.** Scope exceptions narrowly with
   module-level `#![allow(unsafe_code)]`; never relax it at workspace level.
   Expected exceptions are FFI/build glue only.

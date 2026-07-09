@@ -7,12 +7,21 @@ use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
     unsafe {
-        CxxQtBuilder::new_qml_module(QmlModule::new("org.tako").qml_file("qml/main.qml"))
-            .qt_module("Gui")
-            .qt_module("Quick")
-            .cc_builder(|cc| {
-                cc.flag_if_supported("-Wno-sfinae-incomplete");
-            })
-            .build();
+        CxxQtBuilder::new_qml_module(QmlModule::new("org.tako").qml_files([
+            "qml/main.qml",
+            "qml/WorkspaceSidebar.qml",
+            "qml/WorkspaceView.qml",
+            "qml/SurfaceTabBar.qml",
+            "qml/SurfaceContent.qml",
+            "qml/TerminalSurface.qml",
+            "qml/PlaceholderSurface.qml",
+        ]))
+        .qt_module("Gui")
+        .qt_module("Quick")
+        .qt_module("QuickControls2")
+        .cc_builder(|cc| {
+            cc.flag_if_supported("-Wno-sfinae-incomplete");
+        })
+        .build();
     }
 }

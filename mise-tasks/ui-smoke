@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+#MISE description="Run Tako briefly, fail on QML runtime errors, and capture a screenshot artifact."
+set -uo pipefail
+
+root_dir=${MISE_PROJECT_ROOT:-$PWD}
+artifact_dir=${TAKO_UI_SMOKE_DIR:-"$root_dir/target/ui-smoke"}
+timeout_seconds=${TAKO_UI_SMOKE_TIMEOUT:-5}
+
+mkdir -p "$artifact_dir"
+
+log_file="$artifact_dir/tako-ui-smoke.log"
+screenshot_file="$artifact_dir/tako-ui-smoke.png"
+
+rm -f "$log_file" "$screenshot_file"
+
+printf 'ui-smoke: launching tako for %ss\n' "$timeout_seconds"
+
+(
+  cd "$root_dir" || exit 1
+  timeout "$timeout_seconds" cargo run -p tako-app
+) > >(tee "$log_file") 2> >(tee -a "$log_file" >&2)
+run_status=$?
+
+# timeout(1) exits 124 when it successfully terminates the still-running GUI.
+if [[ $run_status -ne 0 && $run_status -ne 124 ]]; then
+  printf 'ui-smoke: tako exited unexpectedly with status %s\n' "$run_status" >&2
+  exit "$run_status"
+fi
+
+if grep -E \
+  'QQmlApplicationEngine failed|ReferenceError|TypeError|Cannot assign| is not a type|Type .* unavailable|not defined' \
+  "$log_file" >/dev/null; then
+  printf 'ui-smoke: QML runtime errors detected in %s\n' "$log_file" >&2
+  exit 1
+fi
+
+if command -v spectacle >/dev/null 2>&1; then
+  (
+    cd "$root_dir" || exit 1
+    cargo run -p tako-app &
+    app_pid=$!
+    sleep 2
+    spectacle -b -a -n -o "$screenshot_file"
+    shot_status=$?
+    kill "$app_pid" >/dev/null 2>&1 || true
+    wait "$app_pid" >/dev/null 2>&1 || true
+    exit "$shot_status"
+  ) >> "$log_file" 2>&1
+
+  if [[ -f "$screenshot_file" ]]; then
+    printf 'ui-smoke: screenshot saved to %s\n' "$screenshot_file"
+  else
+    printf 'ui-smoke: screenshot capture failed; see %s\n' "$log_file" >&2
+    exit 1
+  fi
+else
+  printf 'ui-smoke: spectacle not found; skipped screenshot capture\n'
+fi
+
+printf 'ui-smoke: raw log saved to %s\n' "$log_file"
