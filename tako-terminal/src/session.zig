@@ -47,16 +47,6 @@ pub const TerminalSession = struct {
 };
 
 pub fn terminalHandle(session: ?*TerminalSession) ghostty.GhosttyTerminal {
-    const s = session orelse return null;
-    return s.terminal;
-}
-
-pub fn renderStateHandle(session: ?*TerminalSession) ghostty.GhosttyRenderState {
-    const s = session orelse return null;
-    return s.render_state;
-}
-
-pub fn sessionFromUserdata(userdata: ?*anyopaque) ?*TerminalSession {
     const ptr = userdata orelse return null;
     return @ptrCast(@alignCast(ptr));
 }

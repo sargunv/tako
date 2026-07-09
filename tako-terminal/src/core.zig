@@ -1,7 +1,7 @@
 const std = @import("std");
 const common = @import("common.zig");
+const bootstrap = @import("bootstrap.zig");
 const font = @import("font.zig");
-const atlas = @import("atlas.zig");
 const pty = @import("pty.zig");
 const session = @import("session.zig");
 const snapshot = @import("snapshot.zig");
@@ -47,252 +47,28 @@ pub export fn tako_terminal_bytes_free(bytes: TerminalBytes) void {
 
 pub export fn tako_terminal_session_new(options: ?*const TerminalOptions) ?*TerminalSession {
     const terminal_options = options orelse return null;
-    const resolved_font = font.resolveFontPath(
-        terminal_options.font_path,
-        terminal_options.font_family,
-    ) orelse return null;
-    defer allocator.free(resolved_font);
-
-    const backend_options = common.SurfaceOptions{
-        .font_path = resolved_font.ptr,
-        .pixel_height = terminal_options.pixel_height,
-        .dpr = terminal_options.dpr,
-    };
-    const surface = font.fontCoreCreateWithOptions(&backend_options) orelse return null;
-    var terminal: ghostty.GhosttyTerminal = null;
-    const terminal_init_options = ghostty.GhosttyTerminalOptions{
+    const p = pty.PtySession.spawn(terminal_options) orelse return null;
+    const sess = bootstrap.createSession(.{
         .cols = terminal_options.cols,
         .rows = terminal_options.rows,
+        .font_path = terminal_options.font_path,
+        .font_family = terminal_options.font_family,
+        .pixel_height = terminal_options.pixel_height,
+        .dpr = terminal_options.dpr,
         .max_scrollback = if (terminal_options.max_scrollback == 0)
             default_scrollback
         else
             terminal_options.max_scrollback,
-    };
-    var result = ghostty.ghostty_terminal_new(null, &terminal, terminal_init_options);
-    if (result != ghostty.GHOSTTY_SUCCESS or terminal == null) {
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-    var render_state: ghostty.GhosttyRenderState = null;
-    result = ghostty.ghostty_render_state_new(null, &render_state);
-    if (result != ghostty.GHOSTTY_SUCCESS or render_state == null) {
-        ghostty.ghostty_terminal_free(terminal);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-    const p = pty.PtySession.spawn(terminal_options) orelse {
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-    var key_encoder: ghostty.GhosttyKeyEncoder = null;
-    result = ghostty.ghostty_key_encoder_new(null, &key_encoder);
-    if (result != ghostty.GHOSTTY_SUCCESS or key_encoder == null) {
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-    var key_event: ghostty.GhosttyKeyEvent = null;
-    result = ghostty.ghostty_key_event_new(null, &key_event);
-    if (result != ghostty.GHOSTTY_SUCCESS or key_event == null) {
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-
-    var mouse_encoder: ghostty.GhosttyMouseEncoder = null;
-    result = ghostty.ghostty_mouse_encoder_new(null, &mouse_encoder);
-    if (result != ghostty.GHOSTTY_SUCCESS or mouse_encoder == null) {
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-    var mouse_event: ghostty.GhosttyMouseEvent = null;
-    result = ghostty.ghostty_mouse_event_new(null, &mouse_event);
-    if (result != ghostty.GHOSTTY_SUCCESS or mouse_event == null) {
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-
-    var selection_gesture: ghostty.GhosttySelectionGesture = null;
-    result = ghostty.ghostty_selection_gesture_new(null, &selection_gesture);
-    if (result != ghostty.GHOSTTY_SUCCESS or selection_gesture == null) {
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    }
-    const selection_press = selection.newSelectionEvent(
-        @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS),
-    ) orelse {
-        selection.freeSelectionResources(terminal, selection_gesture, null, null, null, null);
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-    const selection_drag = selection.newSelectionEvent(
-        @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG),
-    ) orelse {
-        selection.freeSelectionResources(terminal, selection_gesture, selection_press, null, null, null);
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-    const selection_release = selection.newSelectionEvent(
-        @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE),
-    ) orelse {
-        selection.freeSelectionResources(terminal, selection_gesture, selection_press, selection_drag, null, null);
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-    const selection_autoscroll_tick = selection.newSelectionEvent(
-        @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK),
-    ) orelse {
-        selection.freeSelectionResources(
-            terminal,
-            selection_gesture,
-            selection_press,
-            selection_drag,
-            selection_release,
-            null,
-        );
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-
-    const sess = allocator.create(TerminalSession) catch {
-        selection.freeSelectionResources(
-            terminal,
-            selection_gesture,
-            selection_press,
-            selection_drag,
-            selection_release,
-            selection_autoscroll_tick,
-        );
-        ghostty.ghostty_mouse_event_free(mouse_event);
-        ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-        ghostty.ghostty_key_event_free(key_event);
-        ghostty.ghostty_key_encoder_free(key_encoder);
-        p.destroy();
-        snapshot.freeTerminalCore(terminal, render_state);
-        font.fontCoreDestroy(surface);
-        return null;
-    };
-    sess.* = .{
-        .terminal = terminal,
-        .render_state = render_state,
-        .surface = surface,
-        .cols = terminal_options.cols,
-        .rows = terminal_options.rows,
         .pty = p,
-        .pty_response = std.ArrayList(u8).empty,
-        .key_encoder = key_encoder,
-        .key_event = key_event,
-        .mouse_encoder = mouse_encoder,
-        .mouse_event = mouse_event,
-        .selection_gesture = selection_gesture,
-        .selection_press = selection_press,
-        .selection_drag = selection_drag,
-        .selection_release = selection_release,
-        .selection_autoscroll_tick = selection_autoscroll_tick,
-        .glyph_atlas = atlas.OwnedGlyphAtlas.init(),
-    };
-    session.registerTerminalEffects(sess);
-    input.syncMouseGeometry(sess);
+    });
+    if (sess == null) {
+        p.destroy();
+    }
     return sess;
 }
 
 pub export fn tako_terminal_session_destroy(s: ?*TerminalSession) void {
-    const sess = s orelse return;
-    session.freeOptionalBytes(&sess.title);
-    session.freeOptionalBytes(&sess.pwd);
-    session.freeOptionalBytes(&sess.preedit);
-    if (sess.key_event != null) {
-        ghostty.ghostty_key_event_free(sess.key_event);
-        sess.key_event = null;
-    }
-    if (sess.key_encoder != null) {
-        ghostty.ghostty_key_encoder_free(sess.key_encoder);
-        sess.key_encoder = null;
-    }
-    if (sess.mouse_event != null) {
-        ghostty.ghostty_mouse_event_free(sess.mouse_event);
-        sess.mouse_event = null;
-    }
-    if (sess.mouse_encoder != null) {
-        ghostty.ghostty_mouse_encoder_free(sess.mouse_encoder);
-        sess.mouse_encoder = null;
-    }
-    selection.freeSelectionResources(
-        session.terminalHandle(s),
-        sess.selection_gesture,
-        sess.selection_press,
-        sess.selection_drag,
-        sess.selection_release,
-        sess.selection_autoscroll_tick,
-    );
-    sess.selection_gesture = null;
-    sess.selection_press = null;
-    sess.selection_drag = null;
-    sess.selection_release = null;
-    sess.selection_autoscroll_tick = null;
-    if (sess.pty) |p| {
-        p.destroy();
-        sess.pty = null;
-    }
-    sess.pty_response.deinit(allocator);
-    sess.frame_vertices.deinit(allocator);
-    sess.glyph_atlas.deinit();
-    if (sess.render_state != null) {
-        ghostty.ghostty_render_state_free(sess.render_state);
-        sess.render_state = null;
-    }
-    if (sess.terminal != null) {
-        ghostty.ghostty_terminal_free(sess.terminal);
-        sess.terminal = null;
-    }
-    if (sess.surface) |surface| {
-        font.fontCoreDestroy(surface);
-        sess.surface = null;
-    }
-    allocator.destroy(sess);
+    bootstrap.destroySession(s);
 }
 
 pub export fn tako_terminal_session_tick(s: ?*TerminalSession, out: ?*FramePlan) bool {
@@ -368,10 +144,6 @@ pub export fn tako_terminal_session_exited(s: ?*TerminalSession) i32 {
     const sess = s orelse return 0;
     const p = sess.pty orelse return 1;
     return if (p.isExited()) 1 else 0;
-}
-
-pub export fn tako_terminal_session_drain_notify(s: ?*TerminalSession) void {
-    _ = s;
 }
 
 pub export fn tako_terminal_session_resize_pixels(
@@ -772,22 +544,22 @@ pub export fn tako_terminal_session_selection_begin(
 
     selection.setGestureRef(sess.selection_press, &ref);
     selection.setGesturePosition(sess.selection_press, x_px, y_px);
-    selection.setGestureOptionValue(
+    selection.setGestureOption(
         sess.selection_press,
         @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_TIME_NS),
         &time_ns,
     );
-    selection.setGestureOptionValue(
+    selection.setGestureOption(
         sess.selection_press,
         @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_INTERVAL_NS),
         &repeat_interval_ns,
     );
-    selection.setGestureOptionValue(
+    selection.setGestureOption(
         sess.selection_press,
         @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REPEAT_DISTANCE),
         &repeat_distance_px,
     );
-    selection.setGestureOptionValue(
+    selection.setGestureOption(
         sess.selection_press,
         @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_BEHAVIORS),
         &behaviors,
@@ -852,26 +624,13 @@ pub export fn tako_terminal_session_selection_autoscroll_tick(
     return selection.installSelection(s, &sel);
 }
 
-pub export fn tako_terminal_session_selection_end(
+pub export fn tako_terminal_session_selection_end_owned(
     s: ?*TerminalSession,
     x_px: f32,
     y_px: f32,
-    out_buf: ?[*]u8,
-    cap: usize,
-) usize {
-    const sess = s orelse return 0;
-    if (sess.selection_release != null) {
-        if (selection.gridRefAtPixels(s, x_px, y_px)) |ref| {
-            selection.setGestureRef(sess.selection_release, &ref);
-        } else {
-            selection.clearGestureOption(
-                sess.selection_release,
-                @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF),
-            );
-        }
-        _ = selection.dispatchSelectionGesture(sess, sess.selection_release);
-    }
-    return selection.writeFormattedSelection(s, out_buf, cap);
+) TerminalBytes {
+    selection.finishReleaseGesture(s, x_px, y_px);
+    return selection.allocFormattedSelection(s);
 }
 
 pub export fn tako_terminal_session_selection_text(
@@ -880,26 +639,6 @@ pub export fn tako_terminal_session_selection_text(
     cap: usize,
 ) usize {
     return selection.writeFormattedSelection(s, out_buf, cap);
-}
-
-pub export fn tako_terminal_session_selection_end_owned(
-    s: ?*TerminalSession,
-    x_px: f32,
-    y_px: f32,
-) TerminalBytes {
-    const sess = s orelse return selection.allocFormattedSelection(s);
-    if (sess.selection_release != null) {
-        if (selection.gridRefAtPixels(s, x_px, y_px)) |ref| {
-            selection.setGestureRef(sess.selection_release, &ref);
-        } else {
-            selection.clearGestureOption(
-                sess.selection_release,
-                @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF),
-            );
-        }
-        _ = selection.dispatchSelectionGesture(sess, sess.selection_release);
-    }
-    return selection.allocFormattedSelection(s);
 }
 
 pub export fn tako_terminal_session_selection_text_owned(s: ?*TerminalSession) TerminalBytes {

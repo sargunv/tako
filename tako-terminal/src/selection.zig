@@ -17,12 +17,11 @@ pub fn scrollViewport(s: ?*TerminalSession, behavior: ghostty.GhosttyTerminalScr
     session.markNeedsReplan(s);
 }
 
-pub fn gridRefAtPixels(s: ?*TerminalSession, x_px: f32, y_px: f32) ?ghostty.GhosttyGridRef {
-    const t = session.terminalHandle(s);
-    if (t == null) return null;
-
-    var geometry: MouseGeometry = undefined;
-    if (!session.sessionMouseGeometry(s, &geometry)) return null;
+fn localViewportCoordinate(
+    geometry: MouseGeometry,
+    x_px: f32,
+    y_px: f32,
+) ?ghostty.GhosttyPointCoordinate {
     const cell_width = geometry.cell_width;
     const cell_height = geometry.cell_height;
     if (cell_width == 0 or cell_height == 0) return null;
@@ -33,8 +32,21 @@ pub fn gridRefAtPixels(s: ?*TerminalSession, x_px: f32, y_px: f32) ?ghostty.Ghos
     const local_y = @max(y_px - @as(f32, @floatFromInt(geometry.padding_top)), 0.0);
     const raw_col: u32 = @intFromFloat(@floor(local_x / @as(f32, @floatFromInt(cell_width))));
     const raw_row: u32 = @intFromFloat(@floor(local_y / @as(f32, @floatFromInt(cell_height))));
-    const col: u16 = @intCast(@min(raw_col, @min(cols - 1, std.math.maxInt(u16))));
-    const row: u32 = @min(raw_row, rows - 1);
+    return .{
+        .x = @intCast(@min(raw_col, @min(cols - 1, std.math.maxInt(u16)))),
+        .y = @min(raw_row, rows - 1),
+    };
+}
+
+pub fn gridRefAtPixels(s: ?*TerminalSession, x_px: f32, y_px: f32) ?ghostty.GhosttyGridRef {
+    const t = session.terminalHandle(s);
+    if (t == null) return null;
+
+    var geometry: MouseGeometry = undefined;
+    if (!session.sessionMouseGeometry(s, &geometry)) return null;
+    const coord = localViewportCoordinate(geometry, x_px, y_px) orelse return null;
+    const col = coord.x;
+    const row = coord.y;
 
     const point = ghostty.GhosttyPoint{
         .tag = @intCast(ghostty.GHOSTTY_POINT_TAG_VIEWPORT),
@@ -154,20 +166,7 @@ pub fn clearSelectionSession(s: ?*TerminalSession) void {
 }
 
 pub fn viewportCoordinateAtPixels(geometry: MouseGeometry, x_px: f32, y_px: f32) ?ghostty.GhosttyPointCoordinate {
-    const cell_width = geometry.cell_width;
-    const cell_height = geometry.cell_height;
-    if (cell_width == 0 or cell_height == 0) return null;
-
-    const cols = @max(@divFloor(geometry.screen_width, cell_width), 1);
-    const rows = @max(@divFloor(geometry.screen_height, cell_height), 1);
-    const local_x = @max(x_px - @as(f32, @floatFromInt(geometry.padding_left)), 0.0);
-    const local_y = @max(y_px - @as(f32, @floatFromInt(geometry.padding_top)), 0.0);
-    const raw_col: u32 = @intFromFloat(@floor(local_x / @as(f32, @floatFromInt(cell_width))));
-    const raw_row: u32 = @intFromFloat(@floor(local_y / @as(f32, @floatFromInt(cell_height))));
-    return .{
-        .x = @intCast(@min(raw_col, @min(cols - 1, std.math.maxInt(u16)))),
-        .y = @min(raw_row, rows - 1),
-    };
+    return localViewportCoordinate(geometry, x_px, y_px);
 }
 
 pub fn selectionGestureGeometry(geometry: MouseGeometry) ?ghostty.GhosttySelectionGestureGeometry {
@@ -178,14 +177,6 @@ pub fn selectionGestureGeometry(geometry: MouseGeometry) ?ghostty.GhosttySelecti
         .padding_left = geometry.padding_left,
         .screen_height = geometry.screen_height,
     };
-}
-
-fn setGestureOption(
-    event: ghostty.GhosttySelectionGestureEvent,
-    option: ghostty.GhosttySelectionGestureEventOption,
-    value: *const anyopaque,
-) void {
-    _ = ghostty.ghostty_selection_gesture_event_set(event, option, value);
 }
 
 pub fn clearGestureOption(
@@ -242,12 +233,26 @@ pub fn setGestureViewport(
     );
 }
 
-pub fn setGestureOptionValue(
+pub fn setGestureOption(
     event: ghostty.GhosttySelectionGestureEvent,
     option: ghostty.GhosttySelectionGestureEventOption,
     value: *const anyopaque,
 ) void {
-    setGestureOption(event, option, value);
+    _ = ghostty.ghostty_selection_gesture_event_set(event, option, value);
+}
+
+pub fn finishReleaseGesture(s: ?*TerminalSession, x_px: f32, y_px: f32) void {
+    const sess = s orelse return;
+    if (sess.selection_release == null) return;
+    if (gridRefAtPixels(s, x_px, y_px)) |ref| {
+        setGestureRef(sess.selection_release, &ref);
+    } else {
+        clearGestureOption(
+            sess.selection_release,
+            @intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_OPT_REF),
+        );
+    }
+    _ = dispatchSelectionGesture(sess, sess.selection_release);
 }
 
 pub fn sanitizeGestureBehavior(value: u32) ghostty.GhosttySelectionGestureBehavior {
@@ -323,17 +328,10 @@ pub fn writeFormattedSelection(s: ?*TerminalSession, out_buf: ?[*]u8, cap: usize
     const out = out_buf orelse return 0;
     if (t == null or cap == 0) return 0;
 
-    const options = ghostty.GhosttyTerminalSelectionFormatOptions{
-        .size = @sizeOf(ghostty.GhosttyTerminalSelectionFormatOptions),
-        .emit = @intCast(ghostty.GHOSTTY_FORMATTER_FORMAT_PLAIN),
-        .unwrap = true,
-        .trim = true,
-        .selection = null,
-    };
     var written: usize = 0;
     const result = ghostty.ghostty_terminal_selection_format_buf(
         t,
-        options,
+        formattedSelectionOptions(),
         out,
         cap,
         &written,

@@ -5,9 +5,39 @@ const selection = @import("selection.zig");
 
 const ghostty = common.ghostty;
 const allocator = common.allocator;
-const MouseGeometry = common.MouseGeometry;
 
 const TerminalSession = session.TerminalSession;
+const EncodeResult = ghostty.GhosttyResult;
+const EncodeFn = *const fn (*anyopaque, ?*u8, usize, *usize) EncodeResult;
+
+fn encodeToSession(
+    ctx: *anyopaque,
+    encode: EncodeFn,
+    stack_buf: []u8,
+    deliver: *const fn (*TerminalSession, []const u8) void,
+    sess: *TerminalSession,
+) void {
+    var written: usize = 0;
+    const result = encode(ctx, @ptrCast(stack_buf.ptr), stack_buf.len, &written);
+    if (result == ghostty.GHOSTTY_SUCCESS) {
+        if (written > 0) deliver(sess, stack_buf[0..written]);
+        return;
+    }
+    if (result != ghostty.GHOSTTY_OUT_OF_SPACE or written == 0) return;
+
+    const out = allocator.alloc(u8, written) catch return;
+    defer allocator.free(out);
+    var written2: usize = 0;
+    const result2 = encode(ctx, @ptrCast(out.ptr), out.len, &written2);
+    if (result2 == ghostty.GHOSTTY_SUCCESS and written2 > 0) {
+        deliver(sess, out[0..written2]);
+    }
+}
+
+fn clearSelectionThenWrite(sess: *TerminalSession, bytes: []const u8) void {
+    selection.clearSelectionSession(sess);
+    session.writeSessionBytes(sess, bytes);
+}
 
 fn keyConst(comptime key: anytype) ghostty.GhosttyKey {
     return @as(ghostty.GhosttyKey, @intCast(key));
@@ -91,6 +121,28 @@ pub fn textContainsControl(bytes: []const u8) bool {
     return false;
 }
 
+fn encodeKey(ctx: *anyopaque, out: ?*u8, cap: usize, written: *usize) EncodeResult {
+    const sess: *TerminalSession = @ptrCast(@alignCast(ctx));
+    return ghostty.ghostty_key_encoder_encode(
+        sess.key_encoder,
+        sess.key_event,
+        out,
+        cap,
+        written,
+    );
+}
+
+fn encodeMouse(ctx: *anyopaque, out: ?*u8, cap: usize, written: *usize) EncodeResult {
+    const sess: *TerminalSession = @ptrCast(@alignCast(ctx));
+    return ghostty.ghostty_mouse_encoder_encode(
+        sess.mouse_encoder,
+        sess.mouse_event,
+        out,
+        cap,
+        written,
+    );
+}
+
 pub fn writeEncodedKey(sess: *TerminalSession) void {
     const t = session.terminalHandle(sess);
     if (t == null or sess.key_encoder == null or sess.key_event == null) return;
@@ -98,44 +150,14 @@ pub fn writeEncodedKey(sess: *TerminalSession) void {
     ghostty.ghostty_key_encoder_setopt_from_terminal(sess.key_encoder, t);
 
     var buf: [128]u8 = undefined;
-    var written: usize = 0;
-    const result = ghostty.ghostty_key_encoder_encode(
-        sess.key_encoder,
-        sess.key_event,
-        @ptrCast(&buf),
-        buf.len,
-        &written,
-    );
-    if (result == ghostty.GHOSTTY_SUCCESS) {
-        if (written > 0) {
-            selection.clearSelectionSession(sess);
-            session.writeSessionBytes(sess, buf[0..written]);
-        }
-        return;
-    }
-    if (result != ghostty.GHOSTTY_OUT_OF_SPACE or written == 0) return;
-
-    const out = allocator.alloc(u8, written) catch return;
-    defer allocator.free(out);
-    var written2: usize = 0;
-    const result2 = ghostty.ghostty_key_encoder_encode(
-        sess.key_encoder,
-        sess.key_event,
-        @ptrCast(out.ptr),
-        out.len,
-        &written2,
-    );
-    if (result2 == ghostty.GHOSTTY_SUCCESS and written2 > 0) {
-        selection.clearSelectionSession(sess);
-        session.writeSessionBytes(sess, out[0..written2]);
-    }
+    encodeToSession(sess, encodeKey, &buf, clearSelectionThenWrite, sess);
 }
 
 pub fn syncMouseGeometry(s: ?*TerminalSession) void {
     const sess = s orelse return;
     if (sess.mouse_encoder == null) return;
 
-    var geometry: MouseGeometry = undefined;
+    var geometry: common.MouseGeometry = undefined;
     if (!session.sessionMouseGeometry(s, &geometry)) return;
     var size = ghostty.GhosttyMouseEncoderSize{
         .size = @sizeOf(ghostty.GhosttyMouseEncoderSize),
@@ -162,31 +184,5 @@ pub fn writeEncodedMouse(sess: *TerminalSession) void {
     ghostty.ghostty_mouse_encoder_setopt_from_terminal(sess.mouse_encoder, t);
 
     var buf: [64]u8 = undefined;
-    var written: usize = 0;
-    const result = ghostty.ghostty_mouse_encoder_encode(
-        sess.mouse_encoder,
-        sess.mouse_event,
-        @ptrCast(&buf),
-        buf.len,
-        &written,
-    );
-    if (result == ghostty.GHOSTTY_SUCCESS) {
-        if (written > 0) session.writeSessionBytes(sess, buf[0..written]);
-        return;
-    }
-    if (result != ghostty.GHOSTTY_OUT_OF_SPACE or written == 0) return;
-
-    const out = allocator.alloc(u8, written) catch return;
-    defer allocator.free(out);
-    var written2: usize = 0;
-    const result2 = ghostty.ghostty_mouse_encoder_encode(
-        sess.mouse_encoder,
-        sess.mouse_event,
-        @ptrCast(out.ptr),
-        out.len,
-        &written2,
-    );
-    if (result2 == ghostty.GHOSTTY_SUCCESS and written2 > 0) {
-        session.writeSessionBytes(sess, out[0..written2]);
-    }
+    encodeToSession(sess, encodeMouse, &buf, session.writeSessionBytes, sess);
 }
