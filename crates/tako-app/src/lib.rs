@@ -2,6 +2,9 @@
 //!
 //! See ROADMAP.md §2.3 and the Phase 0 spike (§12).
 
+mod model;
+mod shell;
+
 use cxx_qt::casting::Upcast;
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQmlEngine, QUrl};
 use std::pin::Pin;

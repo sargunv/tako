@@ -9,7 +9,7 @@ Item {
     property var workspace
 
     readonly property string selectedSurfaceId: workspace
-        ? shell.selectedSurfaceId(workspace.id, workspace.surfaces[0].id)
+        ? (workspace.selectedSurfaceId || (workspace.surfaces.length > 0 ? workspace.surfaces[0].id : ""))
         : ""
 
     Kirigami.PlaceholderMessage {

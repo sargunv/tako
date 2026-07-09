@@ -9,12 +9,23 @@ Controls.Control {
     required property var shell
     required property var workspace
 
+    readonly property string selectedSurfaceId: tabBarShell.workspace.selectedSurfaceId
+        || (tabBarShell.workspace.surfaces.length > 0 ? tabBarShell.workspace.surfaces[0].id : "")
+
     contentItem: RowLayout {
         spacing: 0
 
         Controls.TabBar {
             Layout.fillWidth: true
-            currentIndex: Math.max(0, tabBarShell.workspace.surfaces.findIndex(surface => surface.id === tabBarShell.shell.selectedSurfaceId(tabBarShell.workspace.id, tabBarShell.workspace.surfaces[0].id)))
+            currentIndex: {
+                const surfaces = tabBarShell.workspace.surfaces;
+                for (let i = 0; i < surfaces.length; ++i) {
+                    if (surfaces[i].id === tabBarShell.selectedSurfaceId) {
+                        return i;
+                    }
+                }
+                return 0;
+            }
 
             Repeater {
                 model: tabBarShell.workspace.surfaces
@@ -25,7 +36,7 @@ Controls.Control {
                     required property var modelData
 
                     text: modelData.title
-                    checked: modelData.id === tabBarShell.shell.selectedSurfaceId(tabBarShell.workspace.id, tabBarShell.workspace.surfaces[0].id)
+                    checked: modelData.id === tabBarShell.selectedSurfaceId
                     leftPadding: Kirigami.Units.mediumSpacing
                     rightPadding: Kirigami.Units.smallSpacing
                     topPadding: Kirigami.Units.smallSpacing
@@ -64,7 +75,7 @@ Controls.Control {
 
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                onClicked: tabBarShell.shell.actionMessage(closeButton.Accessible.name)
+                                onClicked: tabBarShell.shell.closeSurface(tabBarShell.workspace.id, tabButton.modelData.id)
                             }
                         }
                     }

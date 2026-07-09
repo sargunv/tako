@@ -15,165 +15,59 @@ Kirigami.ApplicationWindow {
     visible: true
     title: selectedWorkspace ? selectedWorkspace.title + qsTr(" - Tako") : qsTr("Tako")
 
-    property string selectedWorkspaceId: "ws-shell"
-    property var selectedSurfaceByWorkspace: ({
-        "ws-shell": "surface-shell-terminal"
-    })
-
-    readonly property var takoProject: ({
-        id: "project-tako",
-        title: qsTr("tako"),
-        workspaces: [
-            {
-                id: "ws-shell",
-                title: qsTr("Kirigami App Shell"),
-                surfaces: [
-                    {
-                        id: "surface-shell-terminal",
-                        title: qsTr("Terminal"),
-                        panel: "terminal"
-                    },
-                    {
-                        id: "surface-shell-main",
-                        title: qsTr("main.qml"),
-                        panel: "file"
-                    },
-                    {
-                        id: "surface-shell-notes",
-                        title: qsTr("Notes"),
-                        panel: "file"
-                    }
-                ]
-            },
-            {
-                id: "ws-terminal",
-                title: qsTr("Terminal Polish"),
-                surfaces: [
-                    {
-                        id: "surface-terminal-core",
-                        title: qsTr("Terminal"),
-                        panel: "terminal"
-                    }
-                ]
-            },
-            {
-                id: "ws-persistence",
-                title: qsTr("Session Persistence"),
-                surfaces: [
-                    {
-                        id: "surface-persistence-notes",
-                        title: qsTr("Notes"),
-                        panel: "file"
-                    }
-                ]
-            }
-        ]
-    })
-
-    readonly property var kdeProject: ({
-        id: "project-kde",
-        title: qsTr("kde-experiments"),
-        workspaces: [
-            {
-                id: "ws-hig-layout",
-                title: qsTr("Layout and Navigation"),
-                surfaces: [
-                    {
-                        id: "surface-hig-layout",
-                        title: qsTr("Layout"),
-                        panel: "browser"
-                    }
-                ]
-            },
-            {
-                id: "ws-hig-content",
-                title: qsTr("Displaying Content"),
-                surfaces: [
-                    {
-                        id: "surface-hig-content",
-                        title: qsTr("Content"),
-                        panel: "browser"
-                    }
-                ]
-            },
-            {
-                id: "ws-hig-status",
-                title: qsTr("Status Patterns"),
-                surfaces: [
-                    {
-                        id: "surface-hig-status",
-                        title: qsTr("Status"),
-                        panel: "browser"
-                    }
-                ]
-            }
-        ]
-    })
-
-    readonly property var freeWorkspaces: [
-        {
-            id: "ws-scratch",
-            title: qsTr("Scratch Shell"),
-            surfaces: [
-                {
-                    id: "surface-scratch-terminal",
-                    title: qsTr("Shell"),
-                    panel: "terminal"
-                }
-            ]
-        },
-        {
-            id: "ws-remote",
-            title: qsTr("Remote Spike"),
-            surfaces: [
-                {
-                    id: "surface-remote-notes",
-                    title: qsTr("Notes"),
-                    panel: "file"
-                }
-            ]
-        }
-    ]
-
-    readonly property var projects: [takoProject, kdeProject]
-    readonly property var selectedWorkspace: workspaceById(selectedWorkspaceId)
-
-    function allWorkspaces() {
-        let result = [];
-        for (const project of projects) {
-            result = result.concat(project.workspaces);
-        }
-        return result.concat(freeWorkspaces);
+    AppShell {
+        id: appShell
     }
 
+    readonly property var workspaces: appShell.workspaces || []
+    readonly property string selectedWorkspaceId: appShell.selectedWorkspaceId
+    readonly property var selectedWorkspace: workspaceById(selectedWorkspaceId)
+
     function workspaceById(id) {
-        for (const workspace of allWorkspaces()) {
+        for (const workspace of root.workspaces) {
             if (workspace.id === id) {
                 return workspace;
             }
         }
-        return takoProject.workspaces[0];
+        return root.workspaces.length > 0 ? root.workspaces[0] : null;
     }
 
     function selectWorkspace(id) {
-        selectedWorkspaceId = id;
-    }
-
-    function selectedSurfaceId(workspaceId, fallbackId) {
-        return selectedSurfaceByWorkspace[workspaceId] || fallbackId;
+        appShell.selectWorkspace(id);
     }
 
     function selectSurface(workspaceId, surfaceId) {
-        const next = {};
-        for (const key in selectedSurfaceByWorkspace) {
-            next[key] = selectedSurfaceByWorkspace[key];
-        }
-        next[workspaceId] = surfaceId;
-        selectedSurfaceByWorkspace = next;
+        appShell.selectSurface(workspaceId, surfaceId);
     }
 
-    function actionMessage(label) {
-        showPassiveNotification(qsTr("%1 is not wired to the model yet.").arg(label));
+    function createWorkspace(title) {
+        appShell.createWorkspace(title || "");
+    }
+
+    function renameWorkspace(id, title) {
+        appShell.renameWorkspace(id, title);
+    }
+
+    function closeWorkspace(id) {
+        appShell.closeWorkspace(id);
+    }
+
+    function createTerminal(workspaceId) {
+        appShell.createTerminal(workspaceId || root.selectedWorkspaceId);
+    }
+
+    function closeSurface(workspaceId, surfaceId) {
+        appShell.closeSurface(workspaceId, surfaceId);
+    }
+
+    function openRenameDialog() {
+        if (!root.selectedWorkspace) {
+            return;
+        }
+        renameField.text = root.selectedWorkspace.title;
+        renameDialog.open();
+        renameField.forceActiveFocus();
+        renameField.selectAll();
     }
 
     pageStack.initialPage: Kirigami.Page {
@@ -184,22 +78,25 @@ Kirigami.ApplicationWindow {
             Kirigami.Action {
                 text: qsTr("New Workspace")
                 icon.name: "list-add"
-                onTriggered: root.actionMessage(text)
+                onTriggered: root.createWorkspace("")
             },
             Kirigami.Action {
                 text: qsTr("New Terminal")
                 icon.name: "utilities-terminal"
-                onTriggered: root.actionMessage(text)
+                enabled: !!root.selectedWorkspace
+                onTriggered: root.createTerminal(root.selectedWorkspaceId)
             },
             Kirigami.Action {
                 text: qsTr("Rename Workspace")
                 icon.name: "edit-rename"
-                onTriggered: root.actionMessage(text)
+                enabled: !!root.selectedWorkspace
+                onTriggered: root.openRenameDialog()
             },
             Kirigami.Action {
                 text: qsTr("Close Workspace")
                 icon.name: "window-close"
-                onTriggered: root.actionMessage(text)
+                enabled: !!root.selectedWorkspace
+                onTriggered: root.closeWorkspace(root.selectedWorkspaceId)
             }
         ]
 
@@ -222,6 +119,21 @@ Kirigami.ApplicationWindow {
                 Layout.fillHeight: true
                 shell: root
                 workspace: root.selectedWorkspace
+            }
+        }
+
+        Kirigami.PromptDialog {
+            id: renameDialog
+            title: qsTr("Rename Workspace")
+            standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+            onAccepted: {
+                root.renameWorkspace(root.selectedWorkspaceId, renameField.text);
+            }
+
+            Controls.TextField {
+                id: renameField
+                placeholderText: qsTr("Workspace name")
+                onAccepted: renameDialog.accept()
             }
         }
     }
