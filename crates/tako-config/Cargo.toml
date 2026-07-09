@@ -1,0 +1,12 @@
+[package]
+name = "tako-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal configuration loading for Tako."
+
+[dependencies]
+log = "0.4"
+
+[lints]
+workspace = true

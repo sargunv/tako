@@ -16,20 +16,6 @@ use crate::ffi;
 use crate::terminal::Terminal;
 use crate::{Error, grid_ref::GridRef, point::Point};
 
-/// Endpoint adjustment for [`Terminal::selection_adjust`] (keyboard selection:
-/// Shift+arrows etc.). Mirrors `GhosttySelectionAdjust`.
-pub use ffi::GhosttySelectionAdjust as SelectionAdjust;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_BEGINNING_OF_LINE as ADJUST_BEGINNING_OF_LINE;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_DOWN as ADJUST_DOWN;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_END as ADJUST_END;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_END_OF_LINE as ADJUST_END_OF_LINE;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_HOME as ADJUST_HOME;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_LEFT as ADJUST_LEFT;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_PAGE_DOWN as ADJUST_PAGE_DOWN;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_PAGE_UP as ADJUST_PAGE_UP;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_RIGHT as ADJUST_RIGHT;
-pub use ffi::GhosttySelectionAdjust_GHOSTTY_SELECTION_ADJUST_UP as ADJUST_UP;
-
 /// Selection endpoint ordering, for [`Terminal::selection_order`] /
 /// [`Terminal::selection_ordered`]. Mirrors `GhosttySelectionOrder`.
 pub use ffi::GhosttySelectionOrder as SelectionOrder;
@@ -89,6 +75,18 @@ impl Selection {
     /// Rectangle / block mode (vs linear).
     pub fn rectangle(&self) -> bool {
         self.raw.rectangle
+    }
+
+    /// Construct a selection snapshot from two untracked endpoint refs.
+    pub fn from_refs(start: GridRef, end: GridRef, rectangle: bool) -> Self {
+        Self {
+            raw: ffi::GhosttySelection {
+                size: core::mem::size_of::<ffi::GhosttySelection>(),
+                start: start.raw,
+                end: end.raw,
+                rectangle,
+            },
+        }
     }
 }
 
@@ -205,14 +203,6 @@ impl Terminal {
         Ok(out)
     }
 
-    /// Select-all (full screen incl. scrollback that's in the active screen).
-    pub fn select_all(&self) -> Result<Selection, Error> {
-        let mut out = Selection::empty();
-        let result = unsafe { ffi::ghostty_terminal_select_all(self.as_raw(), &mut out.raw) };
-        Error::from_result(result)?;
-        Ok(out)
-    }
-
     /// Semantic command-output selection containing `ref_` (OSC 133-bounded).
     pub fn select_output(&self, ref_: &GridRef) -> Result<Selection, Error> {
         let mut out = Selection::empty();
@@ -223,19 +213,6 @@ impl Terminal {
     }
 
     // ---- mutation / query ----
-
-    /// Move the logical end of `selection` by `adjustment` (keyboard selection
-    /// extension). Mutates in place; install via [`Self::set_selection`] to
-    /// persist. The refs must be valid untracked snapshots of the active
-    /// screen.
-    pub fn selection_adjust(&self, selection: &mut Selection, adjustment: SelectionAdjust) {
-        // The library documents this as best-effort; a non-success here just
-        // means the selection is unchanged (e.g. the endpoint is pinned). We
-        // keep the prior `selection` value on failure.
-        let _ = unsafe {
-            ffi::ghostty_terminal_selection_adjust(self.as_raw(), &mut selection.raw, adjustment)
-        };
-    }
 
     /// Query whether `point` falls within `selection` (handles rect/block and
     /// multi-row linear). Used for ad-hoc hit-testing; the per-row highlight

@@ -395,3 +395,27 @@ pub unsafe fn free_effects(ptr: *mut c_void) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use crate::terminal::Terminal;
+
+    use super::TerminalEffects;
+
+    #[test]
+    fn bell_effect_fires_for_bel() {
+        let count = Rc::new(Cell::new(0_u32));
+        let count_for_effect = Rc::clone(&count);
+        let effects = TerminalEffects::new().with_bell(move || {
+            count_for_effect.set(count_for_effect.get() + 1);
+        });
+        let mut terminal = Terminal::new_with_effects(80, 24, 100, effects).unwrap();
+
+        terminal.vt_write(b"\x07hello\x07");
+
+        assert_eq!(count.get(), 2);
+    }
+}

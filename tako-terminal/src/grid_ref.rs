@@ -78,6 +78,36 @@ impl GridRef {
         }
         if s.is_empty() { None } else { Some(s) }
     }
+
+    /// Read this cell's OSC 8 hyperlink URI, if present.
+    pub fn hyperlink_uri(&self) -> Option<String> {
+        let mut probe_len = 0usize;
+        let probe_result = unsafe {
+            ffi::ghostty_grid_ref_hyperlink_uri(&self.raw, core::ptr::null_mut(), 0, &mut probe_len)
+        };
+        if probe_result == ffi::GhosttyResult_GHOSTTY_SUCCESS && probe_len == 0 {
+            return None;
+        }
+        if probe_result != ffi::GhosttyResult_GHOSTTY_OUT_OF_SPACE || probe_len == 0 {
+            return None;
+        }
+
+        let mut buf = vec![0u8; probe_len];
+        let mut written = 0usize;
+        let result = unsafe {
+            ffi::ghostty_grid_ref_hyperlink_uri(
+                &self.raw,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+            )
+        };
+        if result != ffi::GhosttyResult_GHOSTTY_SUCCESS || written == 0 {
+            return None;
+        }
+        buf.truncate(written);
+        String::from_utf8(buf).ok().filter(|s| !s.is_empty())
+    }
 }
 
 impl From<ffi::GhosttyGridRef> for GridRef {

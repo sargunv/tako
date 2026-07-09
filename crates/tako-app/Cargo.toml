@@ -18,7 +18,8 @@ cxx-qt = "0.9"
 cxx-qt-lib = { version = "0.9", features = ["qt_full"] }
 env_logger = "0.11"
 log = "0.4"
-tako-render = { path = "../tako-render" }
+tako-config = { path = "../tako-config" }
+tako-terminal = { path = "../../tako-terminal" }
 
 [build-dependencies]
 cxx-qt-build = { version = "0.9", features = ["link_qt_object_files"] }

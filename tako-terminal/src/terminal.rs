@@ -1,15 +1,17 @@
-//! Safe owning wrappers over the libghostty-vt `Terminal` and `RenderState`
-//! handles.
+//! Test-only owning wrappers for libghostty-vt handles, plus raw render-state
+//! helpers used while Zig owns the production terminal session.
 //!
 //! Both handles are opaque C pointers that are neither `Send` nor `Sync` —
 //! Rust's default rules for raw pointers correctly keep them pinned to the
-//! thread that owns them. This is the single-thread ownership model the
-//! render-state API documents: only the [`RenderState::update`] call needs
-//! exclusive access to the [`Terminal`], and it is short.
+//! thread that owns them. Production `TerminalView` owns `GhosttyTerminal` and
+//! `GhosttyRenderState` in Zig; Rust only borrows those handles while frame
+//! planning is still being migrated.
 
+#[cfg(test)]
 use std::ffi::c_void;
 
 use crate::Error;
+#[cfg(test)]
 use crate::effects::TerminalEffects;
 use crate::ffi;
 
@@ -17,9 +19,9 @@ use crate::ffi;
 /// and VT stream parser. Owns the underlying `GhosttyTerminal` handle and
 /// frees it on drop.
 ///
-/// When created with [`Terminal::new_with_effects`], also owns a boxed
-/// `TerminalEffects` registered as the terminal's userdata; the box is freed
-/// after the underlying handle on `Drop`.
+/// Test helpers can create this with effects registered; production
+/// `TerminalView` owns effects in Zig.
+#[cfg(test)]
 pub struct Terminal {
     raw: ffi::GhosttyTerminal,
     /// Boxed userdata pointer if effects are registered, null otherwise.
@@ -27,6 +29,7 @@ pub struct Terminal {
     effects: *mut c_void,
 }
 
+#[cfg(test)]
 impl Terminal {
     /// Create a new terminal of the given cell dimensions and scrollback cap,
     /// with no effects registered. Most programs (vim, tmux, less) require
@@ -59,9 +62,7 @@ impl Terminal {
         })
     }
 
-    /// Create a terminal and register the given effects (write_pty, bell,
-    /// title_changed, etc.) on it. The terminal owns the boxed effects; the
-    /// box is freed after `ghostty_terminal_free` on drop.
+    /// Create a terminal and register the given effects for Rust tests.
     pub fn new_with_effects(
         cols: u16,
         rows: u16,
@@ -103,13 +104,14 @@ impl Terminal {
         unsafe { ffi::ghostty_terminal_reset(self.raw) };
     }
 
-    /// Crate-private raw handle, for the snapshot walker in [`crate::snapshot`]
-    /// and the input encoders in [`crate::key`] / [`crate::mouse`].
-    pub(crate) fn as_raw(&self) -> ffi::GhosttyTerminal {
+    /// Raw libghostty-vt handle for test snapshot walkers. Production terminal
+    /// behavior is owned by the Zig core.
+    pub fn as_raw(&self) -> ffi::GhosttyTerminal {
         self.raw
     }
 }
 
+#[cfg(test)]
 impl Drop for Terminal {
     fn drop(&mut self) {
         // Free the terminal first so no in-flight callbacks can fire after
@@ -123,14 +125,16 @@ impl Drop for Terminal {
     }
 }
 
-/// A render state snapshot of a [`Terminal`]: viewport cells, cursor, colors,
-/// and dirty tracking. Owns the underlying `GhosttyRenderState` handle.
+/// A render state snapshot of a libghostty-vt terminal: viewport cells, cursor,
+/// colors, and dirty tracking. Owns the underlying `GhosttyRenderState` handle
+/// in Rust tests only; production ownership lives in Zig.
 pub struct RenderState {
     raw: ffi::GhosttyRenderState,
 }
 
 impl RenderState {
-    /// Create an empty render state. Populate it via [`Self::update`].
+    /// Create an empty render state. Populate it via [`Self::update_raw`] in
+    /// production, or the test-only [`Self::update`] helper in Rust tests.
     pub fn new() -> Result<Self, Error> {
         let mut raw: ffi::GhosttyRenderState = core::ptr::null_mut();
         let result = unsafe {
@@ -147,26 +151,25 @@ impl RenderState {
         Ok(Self { raw })
     }
 
-    /// Pull terminal changes into the render state and recompute dirty flags.
-    /// This is the only call that needs exclusive access to `terminal`.
+    /// Pull terminal changes into the render state and recompute dirty flags
+    /// from the Rust test terminal helper.
+    #[cfg(test)]
     pub fn update(&mut self, terminal: &mut Terminal) -> Result<(), Error> {
-        let result = unsafe { ffi::ghostty_render_state_update(self.raw, terminal.as_raw()) };
-        Error::from_result(result)
+        self.update_raw(terminal.as_raw())
     }
 
-    /// Clear the global dirty flag after a frame has been drawn. Per-row dirty
-    /// flags are cleared individually by [`crate::snapshot::FrameSnapshot`]
-    /// while walking rows.
+    /// Pull terminal changes from a non-Rust-owned terminal handle. This is the
+    /// bridge used while Zig owns `GhosttyTerminal` and Rust still owns frame
+    /// planning.
+    pub fn update_raw(&mut self, terminal: ffi::GhosttyTerminal) -> Result<(), Error> {
+        render_state_update_raw(self.raw, terminal)
+    }
+
+    /// Test helper: clear the global dirty flag after a frame has been drawn.
+    /// Per-row dirty flags are cleared individually by
+    /// [`crate::snapshot::FrameSnapshot`] while walking rows.
     pub fn clear_dirty(&mut self) -> Result<(), Error> {
-        let value = ffi::GhosttyRenderStateDirty_GHOSTTY_RENDER_STATE_DIRTY_FALSE;
-        let result = unsafe {
-            ffi::ghostty_render_state_set(
-                self.raw,
-                ffi::GhosttyRenderStateOption_GHOSTTY_RENDER_STATE_OPTION_DIRTY,
-                &value as *const _ as *const core::ffi::c_void,
-            )
-        };
-        Error::from_result(result)
+        render_state_clear_dirty_raw(self.raw)
     }
 
     /// Crate-private raw handle, for the snapshot walker.
@@ -186,4 +189,27 @@ impl Drop for RenderState {
         // SAFETY: we own the handle uniquely.
         unsafe { ffi::ghostty_render_state_free(self.raw) };
     }
+}
+
+/// Pull terminal changes into a render state owned by the Zig terminal session.
+pub(crate) fn render_state_update_raw(
+    state: ffi::GhosttyRenderState,
+    terminal: ffi::GhosttyTerminal,
+) -> Result<(), Error> {
+    let result = unsafe { ffi::ghostty_render_state_update(state, terminal) };
+    Error::from_result(result)
+}
+
+/// Clear the global dirty flag on a Rust test render state. Production dirty
+/// clearing lives in Zig, next to the owned `GhosttyRenderState`.
+pub(crate) fn render_state_clear_dirty_raw(state: ffi::GhosttyRenderState) -> Result<(), Error> {
+    let value = ffi::GhosttyRenderStateDirty_GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+    let result = unsafe {
+        ffi::ghostty_render_state_set(
+            state,
+            ffi::GhosttyRenderStateOption_GHOSTTY_RENDER_STATE_OPTION_DIRTY,
+            &value as *const _ as *const core::ffi::c_void,
+        )
+    };
+    Error::from_result(result)
 }

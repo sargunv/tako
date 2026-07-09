@@ -1,0 +1,16 @@
+[package]
+name = "tako-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embeddable Qt Quick terminal component."
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+bindgen = "0.71"
+cxx-qt-build = { version = "0.9", features = ["link_qt_object_files"] }
+
+[lints]
+workspace = true

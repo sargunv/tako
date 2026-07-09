@@ -1,5 +1,5 @@
-//! Pure-Rust snapshot of a [`RenderState`](crate::terminal::RenderState),
-//! produced by walking the libghostty-vt row/cell iterators.
+//! Pure-Rust snapshot of a libghostty-vt render state, produced by walking the
+//! libghostty-vt row/cell iterators.
 //!
 //! This mirrors the C `example/c-vt-render/src/main.c` embedding contract:
 //! update the render state from the terminal, then read dirty state, colors,
@@ -7,12 +7,14 @@
 //! is plain owned data (`Vec`s, `String`s) safe to pass across threads and up
 //! to a renderer.
 //!
-//! [`FrameSnapshot::capture`] clears per-row dirty flags as it walks. The
-//! global dirty flag is left untouched — clear it separately via
-//! [`RenderState::clear_dirty`](crate::terminal::RenderState::clear_dirty)
-//! after rendering the frame.
+//! The capture helpers clear per-row dirty flags as they walk. The global dirty
+//! flag is left untouched; the owner clears it after accepting the rendered
+//! frame. Production does that in Zig because Zig owns the live render-state
+//! handle.
 
+#[cfg(test)]
 use crate::ffi;
+#[cfg(test)]
 use crate::terminal::{RenderState, Terminal};
 
 /// Frame-level dirty classification.
@@ -34,6 +36,7 @@ pub struct Rgb {
     pub b: u8,
 }
 
+#[cfg(test)]
 impl From<ffi::GhosttyColorRgb> for Rgb {
     fn from(c: ffi::GhosttyColorRgb) -> Self {
         Self {
@@ -95,6 +98,13 @@ pub struct Cell {
     /// The cell's grapheme cluster, UTF-8. Empty for a blank cell.
     pub grapheme: String,
     pub style: Style,
+    /// Whether the cell should emit text glyphs after conceal/invisible and
+    /// blank-cell handling.
+    pub text_visible: bool,
+    /// Final foreground color for glyph rendering after inverse/selection/faint
+    /// resolution. Production computes this in Zig before crossing the planner
+    /// ABI.
+    pub text_fg: Rgb,
     /// Resolved foreground color, or `None` if the cell has no explicit fg
     /// (use the terminal foreground).
     pub fg: Option<Rgb>,
@@ -133,11 +143,24 @@ impl FrameSnapshot {
     /// Update `state` from `terminal`, then walk the render state into owned
     /// Rust data. Clears per-row dirty flags as it goes; the caller clears the
     /// global dirty flag after rendering.
+    #[cfg(test)]
     pub fn capture(terminal: &mut Terminal, state: &mut RenderState) -> Self {
         state
             .update(terminal)
             .expect("ghostty_render_state_update failed");
+        Self::capture_updated(state.as_raw())
+    }
 
+    #[cfg(test)]
+    pub(crate) fn capture_updated(state: ffi::GhosttyRenderState) -> Self {
+        Self::capture_updated_with_cursor(state, Cursor::capture(state))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_updated_with_cursor(
+        state: ffi::GhosttyRenderState,
+        cursor: Cursor,
+    ) -> Self {
         let cols = get_u16(
             state,
             ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_COLS,
@@ -151,8 +174,7 @@ impl FrameSnapshot {
             ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_DIRTY,
         ));
         let colors = Colors::capture(state);
-        let cursor = Cursor::capture(state);
-        let rows_data = walk_rows(state);
+        let rows_data = walk_rows(state, &colors);
 
         FrameSnapshot {
             cols,
@@ -166,6 +188,7 @@ impl FrameSnapshot {
 }
 
 impl Dirty {
+    #[cfg(test)]
     fn from_raw(v: ffi::GhosttyRenderStateDirty) -> Self {
         match v {
             ffi::GhosttyRenderStateDirty_GHOSTTY_RENDER_STATE_DIRTY_FALSE => Self::False,
@@ -177,13 +200,13 @@ impl Dirty {
 }
 
 impl Colors {
-    fn capture(state: &RenderState) -> Self {
+    #[cfg(test)]
+    fn capture(state: ffi::GhosttyRenderState) -> Self {
         // SAFETY: zero-init is valid for this repr(C) POD struct; the library
         // reads `size` to decide how many fields to write.
         let mut raw: ffi::GhosttyRenderStateColors = unsafe { core::mem::zeroed() };
         raw.size = core::mem::size_of::<ffi::GhosttyRenderStateColors>();
-        let result =
-            unsafe { ffi::ghostty_render_state_colors_get(state.as_raw(), &mut raw as *mut _) };
+        let result = unsafe { ffi::ghostty_render_state_colors_get(state, &mut raw as *mut _) };
         assert!(
             result == ffi::GhosttyResult_GHOSTTY_SUCCESS,
             "ghostty_render_state_colors_get failed"
@@ -208,7 +231,8 @@ impl Colors {
 }
 
 impl Cursor {
-    fn capture(state: &RenderState) -> Self {
+    #[cfg(test)]
+    fn capture(state: ffi::GhosttyRenderState) -> Self {
         let visible = get_bool(
             state,
             ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_CURSOR_VISIBLE,
@@ -259,6 +283,7 @@ impl Cursor {
 }
 
 impl CursorStyle {
+    #[cfg(test)]
     fn from_raw(v: ffi::GhosttyRenderStateCursorVisualStyle) -> Self {
         match v {
             ffi::GhosttyRenderStateCursorVisualStyle_GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR => {
@@ -279,6 +304,7 @@ impl CursorStyle {
 }
 
 impl Style {
+    #[cfg(test)]
     fn from_raw(s: ffi::GhosttyStyle) -> Self {
         Self {
             bold: s.bold,
@@ -297,10 +323,12 @@ impl Style {
 // ---- row/cell iteration ----
 
 /// RAII handle over the row iterator.
+#[cfg(test)]
 struct RowIter {
     raw: ffi::GhosttyRenderStateRowIterator,
 }
 
+#[cfg(test)]
 impl RowIter {
     fn new() -> Self {
         let mut raw: ffi::GhosttyRenderStateRowIterator = core::ptr::null_mut();
@@ -314,10 +342,10 @@ impl RowIter {
     }
 
     /// Populate from the render state. Reuses the existing handle.
-    fn populate(&mut self, state: &RenderState) {
+    fn populate(&mut self, state: ffi::GhosttyRenderState) {
         let result = unsafe {
             ffi::ghostty_render_state_get(
-                state.as_raw(),
+                state,
                 ffi::GhosttyRenderStateData_GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR,
                 &mut self.raw as *mut _ as *mut core::ffi::c_void,
             )
@@ -329,6 +357,7 @@ impl RowIter {
     }
 }
 
+#[cfg(test)]
 impl Drop for RowIter {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_render_state_row_iterator_free(self.raw) };
@@ -336,10 +365,12 @@ impl Drop for RowIter {
 }
 
 /// RAII handle over the per-row cells container.
+#[cfg(test)]
 struct RowCells {
     raw: ffi::GhosttyRenderStateRowCells,
 }
 
+#[cfg(test)]
 impl RowCells {
     fn new() -> Self {
         let mut raw: ffi::GhosttyRenderStateRowCells = core::ptr::null_mut();
@@ -353,13 +384,15 @@ impl RowCells {
     }
 }
 
+#[cfg(test)]
 impl Drop for RowCells {
     fn drop(&mut self) {
         unsafe { ffi::ghostty_render_state_row_cells_free(self.raw) };
     }
 }
 
-fn walk_rows(state: &RenderState) -> Vec<Row> {
+#[cfg(test)]
+fn walk_rows(state: ffi::GhosttyRenderState, colors: &Colors) -> Vec<Row> {
     let mut iter = RowIter::new();
     iter.populate(state);
     let mut cells = RowCells::new();
@@ -384,12 +417,14 @@ fn walk_rows(state: &RenderState) -> Vec<Row> {
             "row_get(CELLS) failed"
         );
 
+        let selection = row_get_selection(iter.raw);
         let mut row_cells = Vec::new();
         while unsafe { ffi::ghostty_render_state_row_cells_next(cells.raw) } {
-            row_cells.push(read_cell(cells.raw));
+            let col = row_cells.len();
+            let selected =
+                selection.is_some_and(|(sx, ex)| col >= sx as usize && col <= ex as usize);
+            row_cells.push(read_cell(cells.raw, colors, selected));
         }
-
-        let selection = row_get_selection(iter.raw);
 
         // Clear this row's dirty flag now that we've captured it.
         let clean = false;
@@ -414,6 +449,7 @@ fn walk_rows(state: &RenderState) -> Vec<Row> {
 /// Read this row's selected cell range. Returns `None` when the row doesn't
 /// intersect the active selection (NO_VALUE) — i.e. no selection is installed
 /// or this row is outside it.
+#[cfg(test)]
 fn row_get_selection(iter: ffi::GhosttyRenderStateRowIterator) -> Option<(u16, u16)> {
     // SAFETY: zero-init valid for this sized-struct POD; the library reads
     // `size` to decide how many fields to write.
@@ -433,7 +469,8 @@ fn row_get_selection(iter: ffi::GhosttyRenderStateRowIterator) -> Option<(u16, u
     }
 }
 
-fn read_cell(cells: ffi::GhosttyRenderStateRowCells) -> Cell {
+#[cfg(test)]
+fn read_cell(cells: ffi::GhosttyRenderStateRowCells, colors: &Colors, selected: bool) -> Cell {
     let grapheme = read_grapheme_utf8(cells);
 
     let style = {
@@ -463,17 +500,48 @@ fn read_cell(cells: ffi::GhosttyRenderStateRowCells) -> Cell {
         cells,
         ffi::GhosttyRenderStateRowCellsData_GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
     );
+    let text_fg = effective_text_fg(style, fg, bg, colors, selected);
+    let text_visible = !style.invisible && !grapheme.is_empty();
 
     Cell {
         grapheme,
         style,
+        text_visible,
+        text_fg,
         fg,
         bg,
     }
 }
 
+#[cfg(test)]
+fn effective_text_fg(
+    style: Style,
+    fg: Option<Rgb>,
+    bg: Option<Rgb>,
+    colors: &Colors,
+    selected: bool,
+) -> Rgb {
+    let mut effective_fg = fg.unwrap_or(colors.foreground);
+    let mut effective_bg = bg.unwrap_or(colors.background);
+    if style.inverse {
+        core::mem::swap(&mut effective_fg, &mut effective_bg);
+    }
+    if selected {
+        core::mem::swap(&mut effective_fg, &mut effective_bg);
+    }
+    if style.faint {
+        effective_fg = Rgb {
+            r: effective_fg.r / 2,
+            g: effective_fg.g / 2,
+            b: effective_fg.b / 2,
+        };
+    }
+    effective_fg
+}
+
 /// Read a cell's resolved color. Returns `None` when the cell has no explicit
 /// color of that kind (`GHOSTTY_INVALID_VALUE`).
+#[cfg(test)]
 fn read_cell_color(
     cells: ffi::GhosttyRenderStateRowCells,
     kind: ffi::GhosttyRenderStateRowCellsData,
@@ -495,6 +563,7 @@ fn read_cell_color(
 
 /// Read a cell's grapheme cluster as UTF-8 via the two-pass `GhosttyBuffer`
 /// protocol (query required length, then fill).
+#[cfg(test)]
 fn read_grapheme_utf8(cells: ffi::GhosttyRenderStateRowCells) -> String {
     // First pass: cap 0 → OUT_OF_SPACE with `len` set to required bytes.
     let mut probe = ffi::GhosttyBuffer {
@@ -533,6 +602,7 @@ fn read_grapheme_utf8(cells: ffi::GhosttyRenderStateRowCells) -> String {
     String::from_utf8_lossy(&bytes[..buf.len]).into_owned()
 }
 
+#[cfg(test)]
 impl From<Rgb> for ffi::GhosttyColorRgb {
     fn from(c: Rgb) -> Self {
         ffi::GhosttyColorRgb {
@@ -545,14 +615,11 @@ impl From<Rgb> for ffi::GhosttyColorRgb {
 
 // ---- small typed render_state_get helpers ----
 
-fn get_u16(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> u16 {
+#[cfg(test)]
+fn get_u16(state: ffi::GhosttyRenderState, kind: ffi::GhosttyRenderStateData) -> u16 {
     let mut v: u16 = 0;
     let result = unsafe {
-        ffi::ghostty_render_state_get(
-            state.as_raw(),
-            kind,
-            &mut v as *mut u16 as *mut core::ffi::c_void,
-        )
+        ffi::ghostty_render_state_get(state, kind, &mut v as *mut u16 as *mut core::ffi::c_void)
     };
     assert!(
         result == ffi::GhosttyResult_GHOSTTY_SUCCESS,
@@ -561,14 +628,11 @@ fn get_u16(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> u16 {
     v
 }
 
-fn get_int<T: Copy>(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> T {
+#[cfg(test)]
+fn get_int<T: Copy>(state: ffi::GhosttyRenderState, kind: ffi::GhosttyRenderStateData) -> T {
     let mut v = unsafe { core::mem::zeroed::<T>() };
     let result = unsafe {
-        ffi::ghostty_render_state_get(
-            state.as_raw(),
-            kind,
-            &mut v as *mut T as *mut core::ffi::c_void,
-        )
+        ffi::ghostty_render_state_get(state, kind, &mut v as *mut T as *mut core::ffi::c_void)
     };
     assert!(
         result == ffi::GhosttyResult_GHOSTTY_SUCCESS,
@@ -577,14 +641,11 @@ fn get_int<T: Copy>(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> T
     v
 }
 
-fn get_bool(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> bool {
+#[cfg(test)]
+fn get_bool(state: ffi::GhosttyRenderState, kind: ffi::GhosttyRenderStateData) -> bool {
     let mut v: bool = false;
     let result = unsafe {
-        ffi::ghostty_render_state_get(
-            state.as_raw(),
-            kind,
-            &mut v as *mut bool as *mut core::ffi::c_void,
-        )
+        ffi::ghostty_render_state_get(state, kind, &mut v as *mut bool as *mut core::ffi::c_void)
     };
     assert!(
         result == ffi::GhosttyResult_GHOSTTY_SUCCESS,
@@ -593,6 +654,7 @@ fn get_bool(state: &RenderState, kind: ffi::GhosttyRenderStateData) -> bool {
     v
 }
 
+#[cfg(test)]
 fn row_get_bool(
     iter: ffi::GhosttyRenderStateRowIterator,
     kind: ffi::GhosttyRenderStateRowData,

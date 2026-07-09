@@ -63,12 +63,13 @@ notified only when an agent actually needs them.
 
 | Layer                                           | Choice                                                                |
 | ----------------------------------------------- | --------------------------------------------------------------------- |
-| Host language                                   | Rust (edition 2021+)                                                  |
-| Terminal core                                   | **libghostty-vt** (C ABI; `bindgen` from Rust)                        |
-| PTY                                             | `portable-pty` crate                                                  |
+| App host language                               | Rust (edition 2024)                                                   |
+| Terminal component                              | `tako-terminal`: C++ Qt/QML facade + Zig implementation core target   |
+| Terminal core                                   | **libghostty-vt**                                                     |
+| PTY                                             | Owned inside `tako-terminal` implementation core                      |
 | Font shaping                                    | freetype + harfbuzz + fontconfig (ghostty's stack), via Rust crates   |
-| Terminal renderer                               | Custom `QQuickItem` via **Qt Quick RHI** (Metal/Vulkan/GL/D3D11)      |
-| Qt bridge                                       | **cxx-qt** (safe Rust↔Qt via CXX)                                     |
+| Terminal renderer                               | Embeddable Qt Quick `TerminalView` component                          |
+| Qt bridge                                       | **cxx-qt** for Rust app models/actions                                |
 | Shell                                           | Qt6 + **QtQuick/QML** + **Kirigami** chrome                           |
 | Async runtime                                   | `tokio` (D-Bus server, git/PR polling, port scans, file watching)     |
 | Git                                             | `gix` crate (direct `.git/` reads) + `reqwest` (GitHub PR polling)    |
@@ -78,6 +79,83 @@ notified only when an agent actually needs them.
 | IPC                                             | D-Bus on session bus; p2p escape hatch if event stream ever saturates |
 | KDE Frameworks                                  | KNotification, KConfig, KGlobalAccel, KWindowSystem, KIconLoader,     |
 | KColorScheme, KIO (phase 7), KWallet (optional) |                                                                       |
+
+### 2.1.1 Component boundary decisions
+
+Current decision (2026-07): **carve the terminal into an embeddable Qt
+component**.
+
+The public terminal boundary is `tako-terminal`: a Qt Quick component that any
+Qt app should be able to import as `org.tako.terminal` and use as
+`TerminalView`. Its API is Qt-native: properties, signals, invokables, focus,
+input, clipboard, session lifecycle, DPR/window handling, and render-thread
+glue. The application should not know whether the terminal implementation behind
+that facade is Rust, Zig, or some later internal split.
+
+Target split:
+
+- C++ owns the Qt/QML facade: `QQuickFramebufferObject`/`QQuickItem` subclass,
+  protected event hooks, `QQuickFramebufferObject::Renderer`, QML registration,
+  clipboard, notifier/timer wiring, window/DPR integration, and GL loader
+  callbacks.
+- Zig owns the terminal implementation core: PTY/session lifecycle,
+  libghostty-vt integration, input encoders, selection, frame planning, glyph
+  atlas/render state, and the private ABI consumed by the C++ facade.
+- libghostty-vt remains the source of truth for terminal behavior. Prefer its
+  encoders, mode tracking, selection machinery, render-state dirty tracking,
+  grid/scrollback, and OSC state over hand-rolled Tako equivalents.
+- `tako-app` remains Rust + cxx-qt + QML/Kirigami. Rust owns durable app model
+  state and actions; QML owns the reactive KDE shell; the app imports
+  `TerminalView` like any other Qt component.
+
+Current implementation state: `tako-terminal` is now the app-facing package and
+build boundary. It owns the pinned libghostty-vt fetch/build/link path, compiles
+the C++ facade (`src/tako_terminal_view.*`), builds the private Zig
+implementation core (`src/core.zig`), and registers the QML type. Zig owns the
+live libghostty-vt terminal, render-state handle, effects callbacks, PTY/session
+lifecycle, shell-integration bootstrap, input encoders, selection, scrollback
+viewport, title/cwd queries, font family/default resolution, color/cursor
+defaults, and the C ABI consumed by the C++ facade. Zig also owns the frame
+rebuild decision: it updates the Zig-owned render state, reads the dirty/cursor
+state directly, applies cursor-blink/focus presentation policy, compares the
+presented cursor against session state, and builds a new `FramePlan` only when
+needed. Zig also walks the libghostty render-state rows/cells, stamps final text
+glyph foreground/visibility, shapes UTF-8 text runs, rasterizes missing glyphs,
+packs the glyph atlas, finalizes public `FramePlan` metadata, and emits terminal
+background, text decoration, preedit underline/cursor, terminal cursor quads,
+and final vertices. `tako-app` depends on `tako-terminal` and imports
+`org.tako.terminal` like any other Qt component. The old Rust
+`Terminal`/`RenderState` owners and Rust render-state row walker are compiled
+only for tests; production terminal handles, row walking, font service, text
+positioning, cursor quads, and frame metadata finalization live in Zig. Keep the
+Qt/QML API stable and move implementation work behind `tako_terminal_core.h`
+rather than changing `tako-app`.
+
+Config is app/model-owned, not terminal-owned. `tako-config` loads Tako/Ghostty
+style terminal defaults and `tako-app` passes them to `TerminalView` through
+normal Qt properties before QML loads. The embeddable terminal component should
+not read user dotfiles itself.
+
+cxx-qt is still the right bridge for Rust-owned Qt models and QML-facing app
+objects, but not for the terminal facade. `TerminalView` needs protected Qt
+Quick event hooks, a non-QObject `QQuickFramebufferObject::Renderer`, clipboard,
+socket notifier, timers, window/DPR hooks, OpenGL loader access, and low-level
+input event extraction. cxx-qt does not remove that C++ vtable surface.
+
+Do not add `qmetaobject` to the app bridge by default. It remains an option only
+for a specific future spike that proves a Rust-side Qt Quick item route beats
+the dedicated C++/Zig terminal component.
+
+Current decision (2026-07): **keep QML/Kirigami for the application shell**.
+
+The current QML file is tiny, but the v1 product is not: sidebar workspaces,
+surface tabs, split panes, notification panels, settings, Plasma styling, and
+Kirigami interactions are exactly the part of a KDE application where QML is the
+native tool. Replacing that shell with Rust today would mean either abandoning
+Kirigami/Qt Quick ergonomics or writing substantially more C++/CXX shims to
+drive Qt objects imperatively from Rust. That is the opposite of the desired
+direction: Rust should own durable state and actions; QML should remain a thin,
+reactive view layer over Rust snapshots.
 
 ### 2.2 Why libghostty-vt (not alacritty_terminal, not embedded libghostty)
 
@@ -103,10 +181,10 @@ commit, bind against it, bump deliberately.
 
 ```
 tako/
+├── tako-terminal/      # embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── crates/
-│   ├── tako-term/      # libghostty-vt bindgen wrapper, PTY bridge, OSC dispatch
-│   ├── tako-render/    # QQuickItem RHI terminal renderer (cxx-qt-exposed)
-│   └── tako-app/       # cxx-qt bridge: registers Rust model to QML, main entry
+│   ├── tako-app/       # Rust app model + cxx-qt/QML host; depends on tako-terminal
+│   ├── tako-config/    # startup terminal defaults parser
 ├── qml/                # Sidebar, tabs, splits, notification panel, settings UI
 ├── kcfg/               # takorc.kcfg schema + .kcfgc codegen
 ├── data/               # .desktop, metainfo, icons, D-Bus service file
@@ -201,8 +279,8 @@ Per terminal surface:
 3. Read `GHOSTTY_RENDER_STATE_DATA_DIRTY` → `False` (skip frame) / `Partial`
    (redraw dirty rows) / `Full` (redraw all).
 4. On the RHI render pass: glyph atlas (built once per font/dpi, updated when
-   new glyphs appear), per-row cell quads from the dirty iterator, cursor quad
-   per `GHOSTTY_RENDER_STATE_CURSOR_*`, background per `render_state_colors`.
+   new glyphs appear), Zig-emitted glyph/background/decoration/cursor quads
+   composited over the background color from `render_state_colors`.
 5. Reset dirty bits.
 
 RHI is the abstraction layer that libghostty lacks — it picks Metal/Vulkan/GL
@@ -212,46 +290,75 @@ GraphicsApp; on X11 usually GL. Either way Tako's code is the same.
 ### 4.2 Input
 
 - **Keyboard**: Qt `QKeyEvent` → GhosttyKey (W3C UI Events physical codes) →
-  libghostty-vt key encoder. The encoder owns mode-aware logic (DEC 1 cursor
-  keys, DEC 66 keypad, DEC 1036 alt-esc, xterm modifyOtherKeys, Kitty keyboard
-  protocol); Tako never hand-rolls CSI sequences. See `tako-term::key`.
+  Zig-owned libghostty-vt key encoder. The encoder owns mode-aware logic (DEC 1
+  cursor keys, DEC 66 keypad, DEC 1036 alt-esc, xterm modifyOtherKeys, Kitty
+  keyboard protocol); Tako never hand-rolls CSI sequences.
 - **Mouse**: Qt mouse events → libghostty-vt mouse encoder. Coordinates in
-  surface pixels; cell mapping handled by the encoder via the size context
-  (`MouseEncoder::set_size`). Tracking mode + format sync from terminal state
-  per event. See `tako-term::mouse`.
-- **Focus**: libghostty-vt focus encoder emits `CSI I` / `CSI O` only when DEC
-  mode 1004 is set; Tako checks the mode before encoding.
-- **Paste**: `ghostty_paste_encode` strips unsafe controls and wraps in
-  bracketed paste markers when DEC mode 2004 is set.
-- **Selection / clipboard** _(planned)_: PRIMARY (X11 middle-click) + CLIPBOARD.
-  At our pinned ghostty commit, libghostty-vt ships the **full**
+  surface pixels; cell mapping handled by the encoder via the size context. The
+  C++ facade asks Zig whether terminal mouse tracking is active; when it is, Zig
+  syncs mode/format from the live libghostty-vt terminal handle, encodes the
+  mouse event, and writes the resulting bytes to the PTY. While rendering lives
+  in Zig, which owns both live grid dimensions and current cell metrics.
+- **Focus**: Zig calls the libghostty-vt focus encoder to emit `CSI I` / `CSI O`
+  only when DEC mode 1004 is set; it queries the live libghostty-vt terminal
+  handle directly.
+- **Paste**: Zig calls `ghostty_paste_encode` to strip unsafe controls and wrap
+  in bracketed paste markers when DEC mode 2004 is set; it queries the live
+  libghostty-vt terminal handle directly.
+- **Scrollback navigation**: Zig calls `ghostty_terminal_scroll_viewport`
+  directly against the live libghostty-vt terminal handle. `TerminalView`
+  exposes embeddable scroll commands plus read-only scrollbar geometry
+  (`scrollbarTotal`, `scrollbarOffset`, `scrollbarLength`, `viewportAtBottom`)
+  so QML/Kirigami chrome can build native scroll UI without knowing about the
+  backend.
+- **Bell**: libghostty-vt's BEL effect is counted by the implementation core and
+  exposed as `TerminalView::bell(count)`. The embedder owns policy: audible
+  bell, visual flash, sidebar badge, KNotification, or ignore.
+- **Selection / clipboard**: PRIMARY (X11 middle-click) + CLIPBOARD. At our
+  pinned ghostty commit, libghostty-vt ships the **full**
   `GhosttySelectionGesture` state machine (press/drag/release/autoscroll/
   deep-press + multi-click behaviors), semantic derives (`select_word` /
   `select_word_between` / `select_line` / `select_output` / `select_all`),
   keyboard endpoint adjustment (`selection_adjust`), terminal-owned tracked
   active selection (`OPT_SELECTION`), per-row render ranges
   (`GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION`), and one-shot clipboard formatting
-  (`selection_format_alloc`). Tako **drives** the gesture from Qt mouse events
-  (pixel→cell resolution, geometry plumbing, install/preview, repaint, clipboard
-  integration); it does not hand-roll the drag/multi-click logic. OSC 52 with
-  read/write confirm prompts deferred.
-- **IME** _(planned)_: `QInputMethodEvent` → render preedit inline. No
-  libghostty-vt API; the host owns the preedit string and its rendering.
+  (`ghostty_terminal_selection_format_buf`). Zig drives the gesture from Qt
+  mouse events (pixel→cell resolution, geometry plumbing, install/preview,
+  repaint, autoscroll timer, clipboard integration) and drives keyboard
+  selection from Qt key events (`Shift+navigation` → `selection_adjust`, seeded
+  from the active cursor); it does not hand-roll the drag/multi-click/
+  autoscroll/keyboard endpoint logic. The click behavior table is
+  Qt-configurable (`singleClickSelection` / `doubleClickSelection` /
+  `tripleClickSelection`) and maps directly to libghostty's
+  cell/word/line/output gesture units. Select-all plus OSC 133
+  command-output/input selection are also libghostty derives surfaced as
+  `selectAll()`, `selectCommandOutputAt(x, y)`, and
+  `selectCommandInputAt(x, y)`. Zig owns render-state/frame-planning plumbing,
+  selection gestures, keyboard adjustment, select-all/semantic derives, and
+  formatting the active terminal selection for PRIMARY/CLIPBOARD copy-out. OSC
+  52 with read/write confirm prompts deferred.
+- **IME**: `QInputMethodEvent` committed text is sent to the terminal, and
+  `TerminalView` reports `ImCursorRectangle` from `FramePlan` cursor metadata.
+  Inline preedit rendering is host-owned view state: Qt forwards the preedit
+  string/cursor through Zig, `TerminalSession.needs_replan` trips the idle-skip,
+  Zig shapes the preedit text through its owned font service, and Zig uses
+  libghostty-vt Unicode width helpers when drawing the preedit underline/cursor
+  flats.
 
 ### 4.3 OSC dispatch
 
-libghostty-vt's `vt/osc.h` parser emits typed commands. Tako routes them (most
-arrive via the `write_pty` effect or the title/pwd change effects registered in
-`tako-term::effects`):
+libghostty-vt's `vt/osc.h` parser emits typed commands. Tako routes them (some
+arrive via the `write_pty` effect; title/current-directory state is read through
+the Zig implementation core's terminal-data queries):
 
-| OSC          | Command type                                 | Tako consumer                               | Status                                                      |
-| ------------ | -------------------------------------------- | ------------------------------------------- | ----------------------------------------------------------- |
-| 0 / 1 / 2    | change window title                          | surface title → tab bar + sidebar           | ✓ (`title_changed` effect → Qt window title)                |
-| 7            | current working directory (file://host/path) | `Panel.cwd` → git probe, sidebar            | ✓ captured (`pwd_changed` effect); Phase 4 wires to sidebar |
-| 9 / 99 / 777 | notification (iTerm / urxvt variants)        | `tako-notify` ingest                        | deferred (Phase 3)                                          |
-| 133          | FinalTerm prompt marks                       | shell activity (Idle/Prompt/CommandRunning) | deferred (Phase 3)                                          |
-| 8            | hyperlinks                                   | per-cell URL storage + cmd-click            | deferred (see Phase 1 gaps)                                 |
-| 52           | clipboard set/query                          | `QClipboard` with read/write confirm        | deferred (see Phase 1 gaps)                                 |
+| OSC          | Command type                                 | Tako consumer                               | Status                                                        |
+| ------------ | -------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------- |
+| 0 / 1 / 2    | change window title                          | surface title → tab bar + sidebar           | ✓ (Zig terminal-data query → Qt property)                     |
+| 7            | current working directory (file://host/path) | surface cwd → git probe, sidebar            | ✓ captured (Zig terminal-data query); Phase 4 wires sidebar   |
+| 9 / 99 / 777 | notification (iTerm / urxvt variants)        | `tako-notify` ingest                        | deferred (Phase 3)                                            |
+| 133          | FinalTerm prompt marks                       | shell activity (Idle/Prompt/CommandRunning) | deferred (Phase 3)                                            |
+| 8            | hyperlinks                                   | per-cell URL storage + cmd-click            | ✓ (grid-ref lookup → Qt hover/open policy)                    |
+| 52           | clipboard set/query                          | `QClipboard` with read/write confirm        | deferred: current public C API exposes command type, not data |
 
 Plus the explicit shell-integration path (installed by `tako`): zsh/bash/fish
 hooks call into the control API for `report_pwd`, `report_tty`, `ports_kick`
@@ -590,8 +697,9 @@ something dogfoodable.
       font.
 - [x] Measure type-to-pixel latency. Target < 16 ms, no dropped frames under
       `yes` / `cat big.log`.
-- [x] Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject` →
-      `rustybuzz`+`ab_glyph` if freetype/harfbuzz binding is painful
+- [x] Fallback ladder (only if needed): raw GL via `QQuickFramebufferObject`,
+      with font/rasterization strategy revisited if direct FreeType/HarfBuzz
+      binding proved painful
 - [x] **Gate:** latency acceptable → continue. Not → re-scope before further
       investment.
 
@@ -603,10 +711,11 @@ separately and deferred until after the Phase 1 deliverable is dogfooded.
 Subtasks (✓ = landed in this repo):
 
 - [x] One window, one workspace, one terminal surface. Spawn shell.
-- [x] **Render:** FBO+glow pivot, per-cell color (fg/bg/inverse/faint), resize,
-      HiDPI (`set_dpr`), four cursor styles (Block/Bar/Underline/ BlockHollow).
-      Atlas/font rasterization caches. UV sentinel for flat quads.
-- [x] **Effects layer** (`tako-term::effects`): `write_pty`, `bell`,
+- [x] **Render:** QQuickFramebufferObject renderer, per-cell color
+      (fg/bg/inverse/faint), resize, HiDPI (`set_dpr`), four cursor styles
+      (Block/Bar/Underline/ BlockHollow). Atlas/font rasterization caches. UV
+      sentinel for flat quads.
+- [x] **Effects layer** (`tako-terminal/src/core.zig`): `write_pty`, `bell`,
       `title_changed`, `pwd_changed`, `xtversion`, `enquiry`,
       `device_attributes` (DA1/DA2/DA3), `size` (XTWINOPS), `color_scheme` (CSI
       ? 996 n). Identity = "tako 0.1.0", DA1 = VT220 conformance + ANSI color
@@ -623,42 +732,72 @@ Subtasks (✓ = landed in this repo):
       `ghostty_paste_encode`.
 - [x] **Scrollback navigation:** wheel scroll (local viewport) when mouse
       tracking is off; keyboard PageUp/Down via the encoder's ALT_SCROLL
-      handling (mode 1007) when in alt-screen.
+      handling (mode 1007) when in alt-screen. Viewport moves are treated as
+      view-state changes and repaint immediately, even when terminal content
+      dirty bits are unchanged.
 - [x] **OSC 0/2 (title)** wired: window title updates from shell.
 - [x] **OSC 7 (cwd)** captured into Surface state (consumer TBD — Phase 4
       workspace metadata).
-- [x] **Selection engine (core):** drag-select, word/line select (double/triple
-      click), rectangle mode (Alt-drag), copy-on-select to PRIMARY, explicit
-      copy to CLIPBOARD (Ctrl+Shift+C). Drives libghostty-vt's
-      `GhosttySelectionGesture` state machine (which, at our pinned commit, owns
-      press/drag/release/autoscroll/deep-press + multi-click behaviors and
-      word/line derives); the host does pixel→cell resolution, geometry
-      plumbing, install/preview, repaint triggering, and clipboard integration.
-- [ ] **Selection engine (deferred):** autoscroll-to-edge on drag (gesture's
-      `AUTOSCROLL_TICK` + a C++ `QTimer` driving it when the gesture reports
-      `UP`/`DOWN`), keyboard selection (Shift+arrows via
-      `ghostty_terminal_selection_adjust`, seeded from the cursor), and
-      scrollback selection (viewport-tag plumbing for selecting while scrolled
-      back — the coordinate system already supports it).
-- [ ] **Clipboard (deferred):** OSC 52 dispatch with read/write confirm prompts
-      (needs an effects callback addition). The copy/paste shortcuts
+- [x] **BEL:** libghostty effect surfaced as `TerminalView::bell(count)` for
+      embedder-owned attention policy.
+- [x] **Selection engine (core):** drag-select, configurable multi-click
+      selection units (cell/word/line/command output), rectangle mode
+      (Alt-drag), copy-on-select to PRIMARY, explicit copy to CLIPBOARD
+      (Ctrl+Shift+C), drag-to-edge autoscroll, and keyboard selection
+      (Shift+arrows/Home/End/PageUp/PageDown via
+      `ghostty_terminal_selection_adjust`, seeded from the cursor). Drives
+      libghostty-vt's `GhosttySelectionGesture` state machine (which, at our
+      pinned commit, owns press/drag/release/autoscroll/deep-press + multi-click
+      behaviors and word/line/output derives) plus its selection-adjust API; the
+      host does pixel→cell resolution, behavior selection, geometry plumbing,
+      install/preview, repaint triggering, and clipboard integration. Visible
+      pointer coords resolve as `Point::viewport`, so selection works while
+      scrolled back; the gesture tracks the initial press pin through viewport
+      movement.
+- [x] **Selection derive actions:** select-all and semantic command-output/input
+      selection via OSC 133 markers (`selectCommandOutputAt(x, y)`,
+      `selectCommandInputAt(x, y)`) use libghostty-vt's `select_all`,
+      `select_output`, and semantic prompt-bounded `select_line` APIs and
+      install the result as the active selection.
+- [ ] **OSC 52 clipboard:** read/write with confirm prompts. The pinned
+      libghostty-vt internals parse OSC 52, but the public C terminal effect API
+      currently does not expose a clipboard callback and `osc.h` exposes only
+      the command type, not clipboard payload data, so defer until an API bump
+      or a deliberate upstreamable C surface. The copy/paste shortcuts
       (Ctrl+Shift+C/V), middle-click paste (PRIMARY), and copy-on-select landed
       with the core selection engine above.
-- [ ] **IME composition:** render preedit string (no libghostty-vt API; host
-      responsibility). MVP: render unformatted preedit text.
-- [ ] **Cursor blink:** 530 ms on/off phase (xterm default); suppressed on
-      `password_input` to defeat keyloggers; suppressed when unfocused.
-- [ ] **Hyperlinks (OSC 8):** per-cell URL storage + cmd-click open.
-- [ ] **Synchronized Output (DEC 2026):** defer framebuffer flush while mode is
-      set (prevents tearing on bulk output like `tmux attach`).
-- [ ] **Shell-integration script** (zsh/bash/fish) installed by Tako.
-- [ ] **Config (`tako-config`):** font family/size, palette, fg/bg/cursor,
-      scrollback limit, cursor style default. Currently the crate is a stub; the
-      surface hard-codes `fc-match monospace` and ghostty defaults.
+- [x] **IME commit + cursor/preedit:** committed `QInputMethodEvent` text is
+      written to the PTY, `inputMethodQuery(ImCursorRectangle)` reports the
+      latest cursor cell from `FramePlan`, and inline preedit text is
+      host-rendered at the cursor with a preedit cursor overlay.
+- [x] **Cursor blink:** 530 ms on/off phase (xterm default), host-clocked by the
+      Qt facade and applied by Zig as view state; suppressed on `password_input`
+      to defeat keyloggers and suppressed when unfocused. Cursor presentation
+      state remains in Zig.
+- [x] **Hyperlinks (OSC 8):** libghostty-vt stores per-cell hyperlink state;
+      `TerminalView` exposes `hoveredHyperlink`, shows a pointing cursor on
+      Ctrl/Meta-hover, and opens links on Ctrl/Meta-click via Qt.
+- [x] **Synchronized Output (DEC 2026):** defer framebuffer flush while
+      libghostty-vt's synchronized-output mode is set; Zig checks the mode after
+      pumping and before Zig frame capture, then presents once the mode resets
+      (prevents tearing on bulk output like `tmux attach`).
+- [x] **Shell-integration bootstrap:** spawned bash/zsh/fish sessions
+      auto-source per-session Tako hooks that emit OSC 133
+      prompt/input/output/finish markers for libghostty-vt semantic selection.
+      The zsh bootstrap preserves the user's real `ZDOTDIR` before normal rc
+      loading so plugin managers see their expected config directory. Future
+      packaging can expose the same scripts as a persistent installer, but Phase
+      1 dogfood no longer depends on manual dotfile edits.
+- [x] **Config (`tako-config`, startup slice):** parses `TAKO_CONFIG` or
+      `$XDG_CONFIG_HOME/{ghostty,tako}/config` /
+      `~/.config/{ghostty,tako}/config` for font family/size, palette,
+      fg/bg/cursor, scrollback limit, cursor style, and cursor blink; `tako-app`
+      applies those as initial QML root properties bound to `TerminalView`. Full
+      KConfigXT settings UI/reload remains a later app-shell task.
 - [x] **Deliverable (partial):** a usable native terminal. Dogfood daily. Core
-      selection + clipboard landed; the remaining usability gaps before this is
-      fully ticked are selection autoscroll/keyboard/scrollback, OSC 52, and
-      IME.
+      selection + clipboard landed; the remaining deferred gap before this is
+      fully ticked is OSC 52 clipboard, pending an upstreamable/public
+      libghostty-vt C API surface for clipboard payload data.
 
 ### Phase 2 — Sidebar, tabs, splits, workspaces _(~3–4 weeks)_
 

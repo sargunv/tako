@@ -17,6 +17,10 @@ use crate::ffi;
 use crate::terminal::Terminal;
 use crate::{Error, selection::Selection};
 
+pub use ffi::GhosttySelectionGestureAutoscroll as GestureAutoscroll;
+pub use ffi::GhosttySelectionGestureAutoscroll_GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_DOWN as AUTOSCROLL_DOWN;
+pub use ffi::GhosttySelectionGestureAutoscroll_GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_NONE as AUTOSCROLL_NONE;
+pub use ffi::GhosttySelectionGestureAutoscroll_GHOSTTY_SELECTION_GESTURE_AUTOSCROLL_UP as AUTOSCROLL_UP;
 /// Multi-click behavior for a click count (single/double/triple). Mirrors
 /// `GhosttySelectionGestureBehavior`.
 pub use ffi::GhosttySelectionGestureBehavior as GestureBehavior;
@@ -198,6 +202,18 @@ impl SelectionGestureEvent {
             )
         };
     }
+
+    /// Set the viewport cell coordinate for an autoscroll tick.
+    pub fn set_viewport(&mut self, coord: crate::point::PointCoordinate) {
+        let raw: ffi::GhosttyPointCoordinate = coord.into();
+        let _ = unsafe {
+            ffi::ghostty_selection_gesture_event_set(
+                self.handle,
+                ffi::GhosttySelectionGestureEventOption_GHOSTTY_SELECTION_GESTURE_EVENT_OPT_VIEWPORT,
+                &raw as *const ffi::GhosttyPointCoordinate as *const core::ffi::c_void,
+            )
+        };
+    }
 }
 
 impl Drop for SelectionGestureEvent {
@@ -295,6 +311,20 @@ impl SelectionGesture {
                 terminal.as_raw(),
                 ffi::GhosttySelectionGestureData_GHOSTTY_SELECTION_GESTURE_DATA_DRAGGED,
                 &mut v as *mut bool as *mut core::ffi::c_void,
+            )
+        };
+        v
+    }
+
+    /// Current autoscroll request for an active drag gesture.
+    pub fn autoscroll(&self, terminal: &Terminal) -> GestureAutoscroll {
+        let mut v = AUTOSCROLL_NONE;
+        let _ = unsafe {
+            ffi::ghostty_selection_gesture_get(
+                self.handle,
+                terminal.as_raw(),
+                ffi::GhosttySelectionGestureData_GHOSTTY_SELECTION_GESTURE_DATA_AUTOSCROLL,
+                &mut v as *mut GestureAutoscroll as *mut core::ffi::c_void,
             )
         };
         v
