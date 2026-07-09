@@ -2,200 +2,38 @@
 
 Embeddable Qt Quick terminal component for Tako.
 
-`tako-terminal` is the boundary we want to be able to carve out as a small
-library for any Qt application:
+`tako-terminal` exposes a `TerminalView` QML item (under `org.tako.terminal`)
+that any Qt Quick application can drop in. The embedding app treats it like any
+other Qt component: it binds to properties, connects signals, and calls
+invokables, without reaching into backend internals.
 
-- public API: Qt/QML `TerminalView` under `org.tako.terminal`;
-- facade language: C++, because Qt Quick item/render-thread vtables live here;
-- implementation boundary: Zig behind a private C ABI;
-- libghostty-vt build ownership: this package fetches, verifies, builds, and
-  links the pinned `libghostty-vt.a`;
-- current backend: Zig owns the live libghostty-vt terminal, render-state
-  handle, effects callbacks, PTY/session lifecycle, input encoding, selection,
-  shell integration, and terminal option/query plumbing, plus presentation state
-  such as focus, cursor blink phase, IME preedit bytes, previous cursor state,
-  font family/default resolution, render-state row/cell snapshot capture, and
-  the frame rebuild decision. Zig also owns font shaping/rasterization, cell
-  metrics, glyph atlas work, terminal glyph foreground/visibility resolution,
-  terminal/preedit text positioning, terminal cell backgrounds, text
-  decorations, preedit underline/cursor flats, terminal cursor quads, final
-  `Vertex` buffers, and final `FramePlan` metadata.
+## How it works
 
-The app should treat this like any other Qt component. `tako-app` may bind to Qt
-properties, connect signals, and call invokables, but it should not reach
-through to implementation-core details.
+The component splits cleanly down an private ABI:
 
-Configuration loading belongs to the embedding application. For Tako, app
-settings will eventually bind to `TerminalView` properties; for now the demo QML
-hardcodes a small set of defaults. The terminal component itself does not read
-dotfiles.
+- **Qt/QML facade** (C++): the `TerminalView` item and its render-thread
+  renderer. Owns Qt concerns — input events, focus, clipboard, timers, window
+  and DPR hooks, QML registration.
+- **Implementation core** (Zig): owns the live terminal. It drives the
+  libghostty-vt terminal and render state, the PTY session and shell
+  integration, input encoding, selection, font shaping/rasterization, glyph
+  atlas, and frame planning. It produces a `FramePlan` the C++ renderer draws.
 
-## TerminalView API
+The boundary between the two sides stays private and mechanical: the facade
+hands host events and state in, and the core hands frame plans and queries out.
 
-Current QML-facing surface:
+## Library self-sufficiency
 
-- `program`: optional executable. Empty means the user's shell.
-- `initialWorkingDirectory`: optional cwd for session spawn.
-- `scrollbackLimit`: maximum scrollback rows for the next session. Defaults to
-  10000.
-- `shellIntegration`: auto-source Tako shell integration for supported spawned
-  shells (`bash`, `zsh`, `fish`) so libghostty-vt receives OSC 133 semantic
-  prompt markers. Defaults to `true`.
-- `autoStart`: create the PTY session automatically at `componentComplete`.
-  Defaults to `true`; set to `false` for deferred/lazy session creation. Setting
-  it back to `true` after completion starts the session.
-- `running`: read-only `true` while a PTY session exists and has not exited.
-- `title`: read-only OSC-derived title.
-- `currentWorkingDirectory`: read-only OSC-derived cwd.
-- `hoveredHyperlink`: read-only OSC 8 URI under the pointer while Ctrl/Meta is
-  held.
-- `exited`: read-only session exit state.
-- `scrollbarTotal`, `scrollbarOffset`, `scrollbarLength`: read-only scrollback
-  viewport geometry for embedder-owned scrollbars.
-- `viewportAtBottom`: read-only `true` when the viewport follows the active
-  screen instead of looking back through scrollback.
-- `fontFamily`: optional fontconfig family. Empty means system monospace.
-- `fontPixelSize`: logical terminal cell height; live-reloads the font without
-  restarting the PTY.
-- `fontPointSize`: Qt-style point-size twin for `fontPixelSize`; live-reloads
-  the font without restarting the PTY.
-- `foregroundColor`, `backgroundColor`, `cursorColor`: optional terminal default
-  colors. Invalid/unset colors use libghostty-vt defaults; live changes preserve
-  OSC color overrides owned by libghostty state.
-- `colorPalette`: optional full 256-entry default palette as a `QVariantList` of
-  `QColor`s. Empty/unset resets to libghostty-vt's built-in palette.
-- `cursorStyle`: default DECSCUSR reset cursor style (`BarCursor`,
-  `BlockCursor`, `UnderlineCursor`, `HollowBlockCursor`).
-- `cursorBlink`: default DECSCUSR reset blink preference.
-- `singleClickSelection`, `doubleClickSelection`, `tripleClickSelection`: choose
-  libghostty-vt gesture units (`CellSelection`, `WordSelection`,
-  `LineSelection`, `CommandOutputSelection`) for multi-click selection.
-- `engineVersion`: read-only libghostty-vt version string, queried by Zig.
-- `copySelection()`, `pasteClipboard()`, `clearSelection()`, `selectAll()`,
-  `selectCommandOutputAt(x, y)`, `selectCommandInputAt(x, y)`,
-  `writeText(text)`, `scrollLines(lines)`, `scrollToTop()`, `scrollToBottom()`,
-  `scrollToRow(row)`, `start()`, `stop()`, `restart()`.
-- `bell(count)`: emitted after BEL, with coalesced count since the previous
-  pump. Embedders decide whether this becomes sound, visual flash, sidebar
-  attention, or desktop notification.
+This package fetches, verifies, builds, and links the pinned libghostty-vt
+static library itself, so dependents don't need ghostty on their build path. It
+also links system FreeType/HarfBuzz for the Zig font service.
 
-Session-spawn properties (`program`, `initialWorkingDirectory`,
-`scrollbackLimit`, `shellIntegration`) are applied before `componentComplete()`
-starts the PTY, or before an explicit `start()` when `autoStart` is false.
-Changing them after a session starts takes effect on `restart()`. `stop()` kills
-the current session and clears host-visible session state; `restart()` is
-`stop()` followed by `start()`. Font, default color/palette, and default cursor
-properties apply live: the component reloads glyph caches, updates libghostty-vt
-terminal defaults, and reflows/replans while keeping the PTY running.
+## Configuration
 
-## Ownership Rules
-
-The Qt facade owns Qt concerns: event extraction, focus, clipboard, timers,
-socket notifier, QML registration, window/DPR hooks, and the render-thread
-`QQuickFramebufferObject::Renderer`. It also owns Qt input-method integration:
-committed IME text is sent as terminal input, and `ImCursorRectangle` is derived
-from the latest frame plan's cursor metadata.
-
-Selection autoscroll deliberately straddles the facade/core line: libghostty-vt
-owns the gesture state and autoscroll decision, while the Qt facade owns the
-timer that periodically feeds the latest pointer position back into the core.
-Keyboard selection follows the same rule: the Qt facade captures
-Shift+navigation shortcuts, while the core applies libghostty-vt selection
-adjustments and owns the active selection state. Multi-click selection is also
-libghostty-owned: the facade only chooses the behavior table exposed through Qt
-properties. Select-all and semantic command-output/input selection also use
-libghostty-vt derives. The facade exposes them as QML invokables, and the
-implementation core installs the resulting terminal-owned active selection for
-rendering and copying.
-
-Shell integration is spawn configuration, not terminal parsing. The Zig PTY core
-creates per-session temporary startup files for supported shells and removes
-them when the session ends. The scripts emit OSC 133 markers that libghostty-vt
-already understands; host code must not parse those sequences itself. For zsh,
-the temporary startup path restores the user's real `ZDOTDIR` before `.zshrc`
-loads so plugin managers and prompt themes see their normal config directory.
-
-Cursor blink also straddles the boundary: the Qt facade owns the 530 ms timer
-and focus transitions, while the implementation core applies the phase as
-render-only state. Zig computes the presented cursor and keeps cursor
-presentation inside implementation-owned frame planning. Blink is suppressed
-when the item is unfocused or libghostty-vt marks the cursor as password input.
-
-Synchronized output (DEC 2026) is owned by libghostty-vt mode state. Zig checks
-that mode after each PTY drain and before capturing a terminal frame, deferring
-new frame plans while the mode is set and flushing the accumulated terminal
-state after the mode resets.
-
-Scrollback navigation is libghostty-owned state. Zig moves the viewport with
-`ghostty_terminal_scroll_viewport`, queries scrollbar geometry directly from
-libghostty-vt, and the facade exposes cached Qt properties for embedders.
-Embedders should build scrollbar UI from those properties instead of querying
-the terminal backend.
-
-Hyperlinks are also libghostty-owned state. The facade sends physical pointer
-coordinates through the private ABI, the backend resolves them to a grid ref,
-and libghostty returns the OSC 8 URI. The facade owns user policy: hover cursor,
-`hoveredHyperlink`, and Ctrl/Meta-click opening through Qt.
-
-BEL is emitted as a Qt signal. The implementation core counts libghostty's bell
-effect during each PTY pump, the Zig `TerminalSession` coalesces pending rings,
-and the facade emits `bell(count)`. Higher-level notification policy belongs to
-the embedding app.
-
-IME preedit rendering is host-owned view state. The facade forwards Qt preedit
-text and cursor position through the private ABI; the implementation core owns
-the live preedit bytes/cursor byte, shapes the preedit text with its Zig-owned
-font service, and draws the preedit underline/cursor flats itself while
-committed text still goes to the PTY.
-
-The implementation core owns terminal concerns: libghostty-vt handles, PTY
-session, input encoding, selection, frame planning, glyph atlas, and renderer
-state. Keep the ABI between these two sides private and mechanical.
-
-Current files:
-
-- `Cargo.toml` + `build.rs`: app-facing package/build boundary. Cargo fetches
-  and links the pinned libghostty-vt static library, builds the Qt facade, and
-  builds the Zig core.
-- `lib.rs`: Rust-side QML registration shim used by `tako-app`.
-- `tako_terminal_view.*`: Qt/QML facade.
-- `tako_terminal_core.h`: private C++↔Zig ABI consumed by the facade and
-  imported directly by the Zig core, including terminal construction options
-  (`TakoTerminalOptions`), scrollbar state, and owned byte buffers.
-- `tako_terminal_frame.h`: private frame-plan ABI (`FramePlan`/`Vertex`) shared
-  by the facade and implementation core. Zig produces this public render-thread
-  frame shape.
-- `tako_terminal_backend.h`: private Zig implementation structs for resolved
-  font creation options, cell metrics, frame snapshots, shaped text runs, and
-  rasterized glyph bitmaps. The C++ facade must not include it.
-- `bootstrap.zig`: shared session construction and teardown used by the C ABI
-  and Zig tests. Owns ghostty/font/encoder/gesture bootstrap and rollback.
-- `core.zig`: implementation-core composition root and C ABI surface. It is the
-  `zig build-obj` entry, owns the cross-cutting session lifecycle orchestrators
-  (`session_new`/`destroy`/`tick`/`resize`), and defines every
-  `pub export fn
-  tako_terminal_*` as a thin wrapper over the implementation
-  modules. Move real terminal responsibilities into the modules below without
-  changing the facade API.
-- `common.zig`: the single `@cImport` site (ghostty/ft/hb/core_abi/backend/c),
-  ABI type aliases, shared value types (`CursorState`, `MouseGeometry`, …), mode
-  constants, and pure helpers (color resolution, selection predicates, env
-  access). A leaf imported by every other module.
-- `font.zig`: FreeType/HarfBuzz `FontCore`, shape cache, font-family/path
-  resolution, cell metrics, and the `fontCore*` wrappers.
-- `atlas.zig`: `OwnedGlyphAtlas` glyph packing/atlas.
-- `pty.zig`: `PtySession`, shell integration scripts, and spawn.
-- `session.zig`: `TerminalSession` struct, libghostty effects/callbacks, and
-  session state accessors/mutators.
-- `snapshot.zig`: render-state helpers and render-state→backend frame snapshot
-  capture.
-- `frame.zig`: `FramePlan` finalization, vertex assembly, and cursor
-  presentation.
-- `input.zig`: key/mouse encoding.
-- `selection.zig`: selection gestures, grid refs, hyperlinks, selection
-  formatting, and scrollback viewport navigation.
-- `tests.zig`: terminal-core integration tests (`TestSession` + test blocks). It
-  is the `zig test` entry. `cargo test -p tako-terminal` runs
-  `zig test
-  tests.zig` through the Rust shim so the normal workspace test
-  command covers the Zig implementation.
+`tako-terminal` exposes its knobs as regular Qt properties on `TerminalView` —
+it has no internal settings system of its own. The embedding app owns
+configuration policy; for Tako that will be KDE settings. Font, default colors,
+and default cursor properties apply live without restarting the PTY;
+session-spawn properties (`program`, `initialWorkingDirectory`,
+`scrollbackLimit`, `shellIntegration`) apply at session start and on
+`restart()`.
