@@ -296,10 +296,7 @@ pub export fn tako_terminal_session_set_font(
     font_family: ?[*:0]const u8,
     pixel_height: u32,
 ) i32 {
-    const resolved_font = font.resolveFontPath(font_path, font_family) orelse return 0;
-    defer allocator.free(resolved_font);
-
-    const result = font.fontCoreSetFont(session.sessionSurface(s), resolved_font.ptr, pixel_height);
+    const result = font.fontCoreSetFont(session.sessionSurface(s), font_path, font_family, pixel_height);
     if (result != 0) {
         if (s) |sess| sess.glyph_atlas.reset();
         session.markNeedsReplan(s);

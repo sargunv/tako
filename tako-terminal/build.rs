@@ -88,6 +88,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ghostty-vt");
     link_pkg_config_libs("freetype2");
     link_pkg_config_libs("harfbuzz");
+    link_pkg_config_libs("fontconfig");
     println!(
         "cargo:rustc-env=TAKO_TERMINAL_SRC={}",
         terminal_src.display()
@@ -126,6 +127,11 @@ fn build_zig_terminal_core(terminal_dir: &Path, ghostty_include: &Path) {
         }
     }
     for flag in pkg_config_flags("harfbuzz", "--cflags") {
+        if flag != "-pthread" {
+            cmd.arg(flag);
+        }
+    }
+    for flag in pkg_config_flags("fontconfig", "--cflags") {
         if flag != "-pthread" {
             cmd.arg(flag);
         }

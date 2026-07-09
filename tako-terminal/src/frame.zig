@@ -103,6 +103,7 @@ fn appendCellGlyphVertices(
             try appendTextRunGlyphVertices(
                 sess,
                 bytes,
+                font.fontStyleFromCell(cell.style),
                 col_x,
                 baseline,
                 cell.text_fg,
@@ -132,6 +133,7 @@ fn appendPreeditGlyphVertices(
     try appendTextRunGlyphVertices(
         sess,
         preedit,
+        .regular,
         px,
         py + cell_ascent,
         snapshot.colors.foreground,
@@ -142,6 +144,7 @@ fn appendPreeditGlyphVertices(
 fn appendTextRunGlyphVertices(
     sess: *TerminalSession,
     text: []const u8,
+    style: font.FontStyle,
     origin_x: f32,
     baseline: f32,
     color: BackendRgb,
@@ -150,7 +153,7 @@ fn appendTextRunGlyphVertices(
     if (text.len == 0) return;
 
     var shaped: BackendShapedText = std.mem.zeroes(BackendShapedText);
-    if (!font.fontCoreShapeText(sess.surface, text.ptr, text.len, &shaped)) return;
+    if (!font.fontCoreShapeText(sess.surface, style, text.ptr, text.len, &shaped)) return;
     if (shaped.glyphs == null or shaped.glyph_count == 0) return;
 
     var pen_x = origin_x;
@@ -158,7 +161,7 @@ fn appendTextRunGlyphVertices(
     for (glyphs) |glyph| {
         const offset_x = if (apply_offsets) glyph.x_offset else 0.0;
         const offset_y = if (apply_offsets) glyph.y_offset else 0.0;
-        const atlas_glyph = sess.glyph_atlas.ensureGlyph(sess.surface, glyph.glyph_id) catch {
+        const atlas_glyph = sess.glyph_atlas.ensureGlyph(sess.surface, style, glyph.glyph_id) catch {
             pen_x += glyph.x_advance;
             continue;
         };

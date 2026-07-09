@@ -10,6 +10,7 @@
 
 typedef struct TakoTerminalSurfaceOptions {
     const char *font_path;
+    const char *font_family;
     uint32_t pixel_height;
     float dpr;
 } TakoTerminalSurfaceOptions;

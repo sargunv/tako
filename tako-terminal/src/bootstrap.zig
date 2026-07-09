@@ -82,14 +82,12 @@ const SessionBuild = struct {
 };
 
 pub fn createSession(config: SessionConfig) ?*TerminalSession {
-    const resolved_font = font.resolveFontPath(config.font_path, config.font_family) orelse return null;
-    defer allocator.free(resolved_font);
-
     var build: SessionBuild = .{ .pty = config.pty };
     errdefer build.deinit();
 
     const backend_options = common.SurfaceOptions{
-        .font_path = resolved_font.ptr,
+        .font_path = config.font_path,
+        .font_family = config.font_family,
         .pixel_height = config.pixel_height,
         .dpr = config.dpr,
     };

@@ -29,6 +29,10 @@ pub const hb = @cImport({
     @cInclude("hb-ot.h");
 });
 
+pub const fc = @cImport({
+    @cInclude("fontconfig/fontconfig.h");
+});
+
 pub const core_abi = @cImport({
     @cInclude("tako_terminal_core.h");
 });

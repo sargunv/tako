@@ -1,17 +1,52 @@
 const std = @import("std");
 const common = @import("common.zig");
 
-const ghostty = common.ghostty;
 const ft = common.ft;
 const hb = common.hb;
-const backend = common.backend;
+const fc = common.fc;
 const allocator = common.allocator;
 
 const SurfaceOptions = common.SurfaceOptions;
 const CellMetrics = common.CellMetrics;
+const BackendCellStyle = common.BackendCellStyle;
 const BackendShapedGlyph = common.BackendShapedGlyph;
 const BackendShapedText = common.BackendShapedText;
 const BackendRasterizedGlyph = common.BackendRasterizedGlyph;
+
+const style_count = 4;
+
+pub const FontStyle = enum(u8) {
+    regular = 0,
+    bold = 1,
+    italic = 2,
+    bold_italic = 3,
+};
+
+const FaceDescriptor = struct {
+    path: [:0]u8,
+    index: c_long = 0,
+    transform: ?ft.FT_Matrix = null,
+
+    fn clone(self: FaceDescriptor) ?FaceDescriptor {
+        return .{
+            .path = allocator.dupeZ(u8, self.path) catch return null,
+            .index = self.index,
+            .transform = self.transform,
+        };
+    }
+
+    fn deinit(self: *FaceDescriptor) void {
+        allocator.free(self.path);
+    }
+};
+
+const FaceSet = struct {
+    descriptors: [style_count]FaceDescriptor,
+
+    fn deinit(self: *FaceSet) void {
+        for (&self.descriptors) |*descriptor| descriptor.deinit();
+    }
+};
 
 const ShapeCache = struct {
     map: std.StringHashMap([]BackendShapedGlyph),
@@ -67,41 +102,36 @@ const ShapeCache = struct {
     }
 };
 
-pub const FontCore = struct {
+const LoadedFace = struct {
     font_path: [:0]u8,
-    logical_pixel_height: u32,
-    dpr: f32,
-    physical_pixel_height: u32,
-    library: ft.FT_Library,
+    index: c_long,
+    transform: ?ft.FT_Matrix,
     face: ft.FT_Face,
     font_bytes: []u8,
     hb_blob: ?*hb.hb_blob_t,
     hb_face: ?*hb.hb_face_t,
     hb_font: ?*hb.hb_font_t,
     units_per_em: u32,
-    cell: CellMetrics,
     shape_cache: ShapeCache,
-    shaped_buf: std.ArrayList(BackendShapedGlyph) = .empty,
-    raster_pixels: std.ArrayList(u8) = .empty,
 
-    pub fn create(font_path: [*:0]const u8, logical_pixel_height: u32, dpr: f32) ?*FontCore {
-        const owned_path = allocator.dupeZ(u8, std.mem.span(font_path)) catch return null;
+    fn create(
+        library: ft.FT_Library,
+        descriptor: FaceDescriptor,
+        physical_pixel_height: u32,
+    ) ?LoadedFace {
+        const owned_path = allocator.dupeZ(u8, descriptor.path) catch return null;
         errdefer allocator.free(owned_path);
 
-        var library: ft.FT_Library = null;
-        if (ft.FT_Init_FreeType(&library) != 0 or library == null) return null;
-        errdefer _ = ft.FT_Done_FreeType(library);
-
         var face: ft.FT_Face = null;
-        if (ft.FT_New_Face(library, owned_path.ptr, 0, &face) != 0 or face == null) return null;
+        if (ft.FT_New_Face(library, owned_path.ptr, descriptor.index, &face) != 0 or face == null) return null;
         errdefer _ = ft.FT_Done_Face(face);
 
-        const physical_px = physicalFontSize(logical_pixel_height, dpr);
-        if (ft.FT_Set_Pixel_Sizes(face, physical_px, physical_px) != 0) return null;
+        if (ft.FT_Set_Pixel_Sizes(face, physical_pixel_height, physical_pixel_height) != 0) return null;
+        applyFaceTransform(face, descriptor.transform);
 
-        const font_bytes = std.fs.openFileAbsolute(owned_path, .{}) catch return null;
-        defer font_bytes.close();
-        const bytes = font_bytes.readToEndAlloc(allocator, 64 * 1024 * 1024) catch return null;
+        const font_file = std.fs.openFileAbsolute(owned_path, .{}) catch return null;
+        defer font_file.close();
+        const bytes = font_file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch return null;
         errdefer allocator.free(bytes);
 
         const blob = hb.hb_blob_create(
@@ -113,7 +143,7 @@ pub const FontCore = struct {
         ) orelse return null;
         errdefer hb.hb_blob_destroy(blob);
 
-        const hb_face = hb.hb_face_create(blob, 0) orelse return null;
+        const hb_face = hb.hb_face_create(blob, @intCast(descriptor.index)) orelse return null;
         errdefer hb.hb_face_destroy(hb_face);
 
         const hb_font = hb.hb_font_create(hb_face) orelse return null;
@@ -123,36 +153,91 @@ pub const FontCore = struct {
         const upem = @max(hb.hb_face_get_upem(hb_face), 1);
         hb.hb_font_set_scale(hb_font, @intCast(upem), @intCast(upem));
 
-        const core = allocator.create(FontCore) catch return null;
-        core.* = .{
+        return .{
             .font_path = owned_path,
-            .logical_pixel_height = logical_pixel_height,
-            .dpr = dpr,
-            .physical_pixel_height = physical_px,
-            .library = library,
+            .index = descriptor.index,
+            .transform = descriptor.transform,
             .face = face,
             .font_bytes = bytes,
             .hb_blob = blob,
             .hb_face = hb_face,
             .hb_font = hb_font,
             .units_per_em = upem,
-            .cell = computeCellMetrics(face),
             .shape_cache = ShapeCache.init(),
+        };
+    }
+
+    fn deinit(self: *LoadedFace) void {
+        self.shape_cache.deinit();
+        if (self.hb_font) |font| hb.hb_font_destroy(font);
+        if (self.hb_face) |face| hb.hb_face_destroy(face);
+        if (self.hb_blob) |blob| hb.hb_blob_destroy(blob);
+        _ = ft.FT_Done_Face(self.face);
+        allocator.free(self.font_bytes);
+        allocator.free(self.font_path);
+    }
+
+    fn setPixelHeight(self: *LoadedFace, physical_pixel_height: u32) bool {
+        if (ft.FT_Set_Pixel_Sizes(self.face, physical_pixel_height, physical_pixel_height) != 0) return false;
+        applyFaceTransform(self.face, self.transform);
+        self.shape_cache.clear();
+        return true;
+    }
+};
+
+pub const FontCore = struct {
+    logical_pixel_height: u32,
+    dpr: f32,
+    physical_pixel_height: u32,
+    library: ft.FT_Library,
+    faces: [style_count]LoadedFace,
+    cell: CellMetrics,
+    shaped_buf: std.ArrayList(BackendShapedGlyph) = .empty,
+    raster_pixels: std.ArrayList(u8) = .empty,
+
+    pub fn create(
+        font_path: ?[*:0]const u8,
+        font_family: ?[*:0]const u8,
+        logical_pixel_height: u32,
+        dpr: f32,
+    ) ?*FontCore {
+        var descriptors = resolveFaceSet(font_path, font_family) orelse return null;
+        defer descriptors.deinit();
+
+        var library: ft.FT_Library = null;
+        if (ft.FT_Init_FreeType(&library) != 0 or library == null) return null;
+        errdefer _ = ft.FT_Done_FreeType(library);
+
+        const physical_px = physicalFontSize(logical_pixel_height, dpr);
+        var faces: [style_count]LoadedFace = undefined;
+        var loaded: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < loaded) : (i += 1) faces[i].deinit();
+        }
+
+        while (loaded < style_count) : (loaded += 1) {
+            faces[loaded] = LoadedFace.create(
+                library,
+                descriptors.descriptors[loaded],
+                physical_px,
+            ) orelse return null;
+        }
+
+        const core = allocator.create(FontCore) catch return null;
+        core.* = .{
+            .logical_pixel_height = logical_pixel_height,
+            .dpr = dpr,
+            .physical_pixel_height = physical_px,
+            .library = library,
+            .faces = faces,
+            .cell = computeCellMetrics(faces[@intFromEnum(FontStyle.regular)].face),
         };
         return core;
     }
 
     pub fn destroy(self: *FontCore) void {
-        self.shape_cache.deinit();
-        self.shaped_buf.deinit(allocator);
-        self.raster_pixels.deinit(allocator);
-        if (self.hb_font) |font| hb.hb_font_destroy(font);
-        if (self.hb_face) |face| hb.hb_face_destroy(face);
-        if (self.hb_blob) |blob| hb.hb_blob_destroy(blob);
-        _ = ft.FT_Done_Face(self.face);
-        _ = ft.FT_Done_FreeType(self.library);
-        allocator.free(self.font_bytes);
-        allocator.free(self.font_path);
+        self.destroyMoved();
         allocator.destroy(self);
     }
 
@@ -160,14 +245,18 @@ pub const FontCore = struct {
         if (@abs(dpr - self.dpr) < 0.01) return;
         self.dpr = dpr;
         self.physical_pixel_height = physicalFontSize(self.logical_pixel_height, dpr);
-        if (ft.FT_Set_Pixel_Sizes(self.face, self.physical_pixel_height, self.physical_pixel_height) != 0) return;
-        self.cell = computeCellMetrics(self.face);
-        self.shape_cache.clear();
+        for (&self.faces) |*face| _ = face.setPixelHeight(self.physical_pixel_height);
+        self.cell = computeCellMetrics(self.faces[@intFromEnum(FontStyle.regular)].face);
         self.raster_pixels.clearRetainingCapacity();
     }
 
-    pub fn setFont(self: *FontCore, font_path: [*:0]const u8, logical_pixel_height: u32) bool {
-        const replacement = FontCore.create(font_path, logical_pixel_height, self.dpr) orelse return false;
+    pub fn setFont(
+        self: *FontCore,
+        font_path: ?[*:0]const u8,
+        font_family: ?[*:0]const u8,
+        logical_pixel_height: u32,
+    ) bool {
+        const replacement = FontCore.create(font_path, font_family, logical_pixel_height, self.dpr) orelse return false;
         const old = self.*;
         self.* = replacement.*;
         allocator.destroy(replacement);
@@ -177,21 +266,16 @@ pub const FontCore = struct {
     }
 
     fn destroyMoved(self: *FontCore) void {
-        self.shape_cache.deinit();
         self.shaped_buf.deinit(allocator);
         self.raster_pixels.deinit(allocator);
-        if (self.hb_font) |font| hb.hb_font_destroy(font);
-        if (self.hb_face) |face| hb.hb_face_destroy(face);
-        if (self.hb_blob) |blob| hb.hb_blob_destroy(blob);
-        _ = ft.FT_Done_Face(self.face);
+        for (&self.faces) |*face| face.deinit();
         _ = ft.FT_Done_FreeType(self.library);
-        allocator.free(self.font_bytes);
-        allocator.free(self.font_path);
     }
 
-    pub fn shapeText(self: *FontCore, text: []const u8) bool {
+    pub fn shapeText(self: *FontCore, style: FontStyle, text: []const u8) bool {
         self.shaped_buf.clearRetainingCapacity();
-        if (self.shape_cache.get(text)) |cached| {
+        const face = &self.faces[@intFromEnum(style)];
+        if (face.shape_cache.get(text)) |cached| {
             self.shaped_buf.appendSlice(allocator, cached) catch return false;
             return true;
         }
@@ -200,14 +284,14 @@ pub const FontCore = struct {
         defer hb.hb_buffer_destroy(buffer);
         hb.hb_buffer_add_utf8(buffer, @ptrCast(text.ptr), @intCast(text.len), 0, @intCast(text.len));
         hb.hb_buffer_guess_segment_properties(buffer);
-        hb.hb_shape(self.hb_font, buffer, null, 0);
+        hb.hb_shape(face.hb_font, buffer, null, 0);
 
         var count: c_uint = 0;
         const infos = hb.hb_buffer_get_glyph_infos(buffer, &count);
         const positions = hb.hb_buffer_get_glyph_positions(buffer, &count);
         if (infos == null or positions == null) return false;
 
-        const scale = @as(f32, @floatFromInt(self.physical_pixel_height)) / @as(f32, @floatFromInt(self.units_per_em));
+        const scale = @as(f32, @floatFromInt(self.physical_pixel_height)) / @as(f32, @floatFromInt(face.units_per_em));
         var shaped = allocator.alloc(BackendShapedGlyph, count) catch return false;
         errdefer allocator.free(shaped);
         var i: usize = 0;
@@ -220,16 +304,17 @@ pub const FontCore = struct {
             };
         }
         self.shaped_buf.appendSlice(allocator, shaped) catch return false;
-        self.shape_cache.put(text, shaped) catch return false;
+        face.shape_cache.put(text, shaped) catch return false;
         return true;
     }
 
-    pub fn rasterizeGlyph(self: *FontCore, glyph_id: u32) BackendRasterizedGlyph {
+    pub fn rasterizeGlyph(self: *FontCore, style: FontStyle, glyph_id: u32) BackendRasterizedGlyph {
         self.raster_pixels.clearRetainingCapacity();
-        if (ft.FT_Load_Glyph(self.face, glyph_id, ft.FT_LOAD_RENDER) != 0) {
+        const face = &self.faces[@intFromEnum(style)];
+        if (ft.FT_Load_Glyph(face.face, glyph_id, ft.FT_LOAD_RENDER) != 0) {
             return .{ .glyph_id = glyph_id, .width = 0, .height = 0, .left_bearing = 0, .top_bearing = 0, .pixels = null, .pixel_len = 0 };
         }
-        const slot = self.face.*.glyph;
+        const slot = face.face.*.glyph;
         const bitmap = slot.*.bitmap;
         const width: u32 = @intCast(@max(bitmap.width, 0));
         const height: u32 = @intCast(@max(bitmap.rows, 0));
@@ -259,8 +344,7 @@ pub const FontCore = struct {
 
 pub fn fontCoreCreateWithOptions(options: ?*const SurfaceOptions) ?*FontCore {
     const opts = options orelse return null;
-    const path = opts.font_path orelse return null;
-    return FontCore.create(path, opts.pixel_height, opts.dpr);
+    return FontCore.create(opts.font_path, opts.font_family, opts.pixel_height, opts.dpr);
 }
 
 pub fn fontCoreDestroy(surface: ?*FontCore) void {
@@ -270,6 +354,7 @@ pub fn fontCoreDestroy(surface: ?*FontCore) void {
 
 pub fn fontCoreShapeText(
     surface: ?*FontCore,
+    style: FontStyle,
     text: ?[*]const u8,
     text_len: usize,
     out: ?*BackendShapedText,
@@ -278,7 +363,7 @@ pub fn fontCoreShapeText(
     const target = out orelse return false;
     if (text_len > 0 and text == null) return false;
     const bytes = if (text_len == 0) "" else text.?[0..text_len];
-    if (!s.shapeText(bytes)) return false;
+    if (!s.shapeText(style, bytes)) return false;
     target.* = .{
         .glyphs = if (s.shaped_buf.items.len == 0) null else s.shaped_buf.items.ptr,
         .glyph_count = s.shaped_buf.items.len,
@@ -288,12 +373,13 @@ pub fn fontCoreShapeText(
 
 pub fn fontCoreRasterizeGlyph(
     surface: ?*FontCore,
+    style: FontStyle,
     glyph_id: u32,
     out: ?*BackendRasterizedGlyph,
 ) bool {
     const s = surface orelse return false;
     const target = out orelse return false;
-    target.* = s.rasterizeGlyph(glyph_id);
+    target.* = s.rasterizeGlyph(style, glyph_id);
     return true;
 }
 
@@ -305,11 +391,11 @@ pub fn fontCoreSetDpr(surface: ?*FontCore, dpr: f32) void {
 pub fn fontCoreSetFont(
     surface: ?*FontCore,
     font_path: ?[*:0]const u8,
+    font_family: ?[*:0]const u8,
     pixel_height: u32,
 ) i32 {
     const s = surface orelse return 0;
-    const path = font_path orelse return 0;
-    return if (s.setFont(path, pixel_height)) 1 else 0;
+    return if (s.setFont(font_path, font_family, pixel_height)) 1 else 0;
 }
 
 pub fn fontCoreCellMetrics(
@@ -320,6 +406,13 @@ pub fn fontCoreCellMetrics(
     const target = out orelse return false;
     target.* = s.cell;
     return true;
+}
+
+pub fn fontStyleFromCell(style: BackendCellStyle) FontStyle {
+    if (style.bold and style.italic) return .bold_italic;
+    if (style.bold) return .bold;
+    if (style.italic) return .italic;
+    return .regular;
 }
 
 pub fn physicalFontSize(logical_pixel_height: u32, dpr: f32) u32 {
@@ -353,42 +446,146 @@ pub fn glyphAdvancePx(face: ft.FT_Face, codepoint: u32) i32 {
     return @intCast(face.*.glyph.*.advance.x >> 6);
 }
 
-pub fn resolveFontPath(
+fn applyFaceTransform(face: ft.FT_Face, transform: ?ft.FT_Matrix) void {
+    if (transform) |value| {
+        var matrix = value;
+        ft.FT_Set_Transform(face, &matrix, null);
+        return;
+    }
+    ft.FT_Set_Transform(face, null, null);
+}
+
+fn fontconfigMatrixToFreeType(matrix: *const fc.FcMatrix) ?ft.FT_Matrix {
+    const result = ft.FT_Matrix{
+        .xx = fixedFromDouble(matrix.xx),
+        .xy = fixedFromDouble(matrix.xy),
+        .yx = fixedFromDouble(matrix.yx),
+        .yy = fixedFromDouble(matrix.yy),
+    };
+    if (result.xx == fixedFromDouble(1.0) and
+        result.xy == 0 and
+        result.yx == 0 and
+        result.yy == fixedFromDouble(1.0))
+    {
+        return null;
+    }
+    return result;
+}
+
+fn fixedFromDouble(value: f64) ft.FT_Fixed {
+    return @intFromFloat(@round(value * 65536.0));
+}
+
+fn resolveFaceSet(
     explicit_path: ?[*:0]const u8,
     family: ?[*:0]const u8,
-) ?[:0]u8 {
+) ?FaceSet {
     if (common.optionalCString(explicit_path)) |path| {
-        return allocator.dupeZ(u8, path) catch null;
+        const regular = FaceDescriptor{ .path = allocator.dupeZ(u8, path) catch return null };
+        errdefer {
+            var owned = regular;
+            owned.deinit();
+        }
+        var descriptors: [style_count]FaceDescriptor = undefined;
+        var initialized: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < initialized) : (i += 1) descriptors[i].deinit();
+        }
+        while (initialized < style_count) : (initialized += 1) {
+            descriptors[initialized] = regular.clone() orelse return null;
+        }
+        var owned_regular = regular;
+        owned_regular.deinit();
+        return .{ .descriptors = descriptors };
     }
 
     const requested = common.optionalCString(family) orelse "monospace";
-    const argv = [_][]const u8{ "fc-match", "-f", "%{file}", requested };
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &argv,
-        .max_output_bytes = std.fs.max_path_bytes,
-    }) catch |err| {
-        std.log.warn("fc-match failed for font family '{s}': {s}", .{ requested, @errorName(err) });
+    const regular = resolveFontconfigFace(requested, fc.FC_WEIGHT_REGULAR, fc.FC_SLANT_ROMAN) orelse return null;
+    errdefer {
+        var owned = regular;
+        owned.deinit();
+    }
+
+    const bold = resolveFontconfigFace(requested, fc.FC_WEIGHT_BOLD, fc.FC_SLANT_ROMAN) orelse
+        (regular.clone() orelse return null);
+    errdefer {
+        var owned = bold;
+        owned.deinit();
+    }
+
+    const italic = resolveFontconfigFace(requested, fc.FC_WEIGHT_REGULAR, fc.FC_SLANT_ITALIC) orelse
+        (regular.clone() orelse return null);
+    errdefer {
+        var owned = italic;
+        owned.deinit();
+    }
+
+    const bold_italic = resolveFontconfigFace(requested, fc.FC_WEIGHT_BOLD, fc.FC_SLANT_ITALIC) orelse
+        (italic.clone() orelse bold.clone() orelse regular.clone() orelse return null);
+
+    return .{ .descriptors = .{ regular, bold, italic, bold_italic } };
+}
+
+fn resolveFontconfigFace(
+    family: []const u8,
+    weight: c_int,
+    slant: c_int,
+) ?FaceDescriptor {
+    if (fc.FcInit() == 0) {
+        std.log.warn("fontconfig initialization failed", .{});
         return null;
+    }
+
+    const requested = allocator.dupeZ(u8, family) catch return null;
+    defer allocator.free(requested);
+
+    const pattern = fc.FcPatternCreate() orelse return null;
+    defer fc.FcPatternDestroy(pattern);
+
+    if (fc.FcPatternAddString(pattern, fc.FC_FAMILY, @ptrCast(requested.ptr)) == 0) return null;
+    if (fc.FcPatternAddInteger(pattern, fc.FC_WEIGHT, weight) == 0) return null;
+    if (fc.FcPatternAddInteger(pattern, fc.FC_SLANT, slant) == 0) return null;
+    if (fc.FcConfigSubstitute(null, pattern, fc.FcMatchPattern) == 0) return null;
+    fc.FcDefaultSubstitute(pattern);
+
+    var result: fc.FcResult = undefined;
+    const matched = fc.FcFontMatch(null, pattern, &result) orelse return null;
+    defer fc.FcPatternDestroy(matched);
+
+    var file_ptr: [*c]fc.FcChar8 = null;
+    if (fc.FcPatternGetString(matched, fc.FC_FILE, 0, &file_ptr) != fc.FcResultMatch or file_ptr == null) {
+        std.log.warn("fontconfig returned no file for font family '{s}'", .{family});
+        return null;
+    }
+
+    var index: c_int = 0;
+    if (fc.FcPatternGetInteger(matched, fc.FC_INDEX, 0, &index) != fc.FcResultMatch) {
+        index = 0;
+    }
+
+    var matrix_ptr: [*c]fc.FcMatrix = null;
+    const transform = if (fc.FcPatternGetMatrix(matched, fc.FC_MATRIX, 0, &matrix_ptr) == fc.FcResultMatch and matrix_ptr != null)
+        fontconfigMatrixToFreeType(matrix_ptr)
+    else
+        null;
+
+    const path = std.mem.span(@as([*:0]const u8, @ptrCast(file_ptr)));
+    if (path.len == 0) return null;
+    return .{
+        .path = allocator.dupeZ(u8, path) catch return null,
+        .index = @intCast(index),
+        .transform = transform,
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+}
 
-    switch (result.term) {
-        .Exited => |code| if (code != 0) {
-            std.log.warn("fc-match returned {d} for font family '{s}'", .{ code, requested });
-            return null;
-        },
-        else => {
-            std.log.warn("fc-match did not exit normally for font family '{s}'", .{requested});
-            return null;
-        },
-    }
-
-    const path = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (path.len == 0) {
-        std.log.warn("fc-match returned empty path for font family '{s}'", .{requested});
-        return null;
-    }
-    return allocator.dupeZ(u8, path) catch null;
+test "font style mapping" {
+    var style: BackendCellStyle = std.mem.zeroes(BackendCellStyle);
+    try std.testing.expectEqual(FontStyle.regular, fontStyleFromCell(style));
+    style.bold = true;
+    try std.testing.expectEqual(FontStyle.bold, fontStyleFromCell(style));
+    style.italic = true;
+    try std.testing.expectEqual(FontStyle.bold_italic, fontStyleFromCell(style));
+    style.bold = false;
+    try std.testing.expectEqual(FontStyle.italic, fontStyleFromCell(style));
 }

@@ -17,7 +17,7 @@ pub const AtlasGlyph = struct {
 };
 
 pub const OwnedGlyphAtlas = struct {
-    glyphs: std.AutoHashMap(u32, AtlasGlyph),
+    glyphs: std.AutoHashMap(u64, AtlasGlyph),
     pixels: std.ArrayList(u8) = .empty,
     width: u32 = atlas_width,
     height: u32 = 0,
@@ -27,7 +27,7 @@ pub const OwnedGlyphAtlas = struct {
     generation: u64 = 0,
 
     pub fn init() OwnedGlyphAtlas {
-        return .{ .glyphs = std.AutoHashMap(u32, AtlasGlyph).init(allocator) };
+        return .{ .glyphs = std.AutoHashMap(u64, AtlasGlyph).init(allocator) };
     }
 
     pub fn deinit(self: *OwnedGlyphAtlas) void {
@@ -48,12 +48,14 @@ pub const OwnedGlyphAtlas = struct {
     pub fn ensureGlyph(
         self: *OwnedGlyphAtlas,
         surface: ?*font.FontCore,
+        style: font.FontStyle,
         glyph_id: u32,
     ) !AtlasGlyph {
-        if (self.glyphs.get(glyph_id)) |glyph| return glyph;
+        const key = glyphKey(style, glyph_id);
+        if (self.glyphs.get(key)) |glyph| return glyph;
 
         var raster: BackendRasterizedGlyph = std.mem.zeroes(BackendRasterizedGlyph);
-        if (!font.fontCoreRasterizeGlyph(surface, glyph_id, &raster)) {
+        if (!font.fontCoreRasterizeGlyph(surface, style, glyph_id, &raster)) {
             return error.RasterizeFailed;
         }
 
@@ -67,12 +69,12 @@ pub const OwnedGlyphAtlas = struct {
         };
 
         if (raster.width == 0 or raster.height == 0 or raster.pixels == null) {
-            try self.glyphs.put(glyph_id, glyph);
+            try self.glyphs.put(key, glyph);
             return glyph;
         }
 
         if (raster.width > self.width) {
-            try self.glyphs.put(glyph_id, glyph);
+            try self.glyphs.put(key, glyph);
             return glyph;
         }
 
@@ -102,9 +104,13 @@ pub const OwnedGlyphAtlas = struct {
             @memcpy(self.pixels.items[dst_start .. dst_start + (src_end - src_start)], src[src_start..src_end]);
         }
 
-        try self.glyphs.put(glyph_id, glyph);
+        try self.glyphs.put(key, glyph);
         self.generation = self.generation +% 1;
         return glyph;
+    }
+
+    fn glyphKey(style: font.FontStyle, glyph_id: u32) u64 {
+        return (@as(u64, @intFromEnum(style)) << 32) | @as(u64, glyph_id);
     }
 
     fn ensureHeight(self: *OwnedGlyphAtlas, height: u32) !void {

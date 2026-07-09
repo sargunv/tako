@@ -47,8 +47,10 @@ mod tests {
 
         add_pkg_config_args(&mut cmd, "freetype2", "--cflags");
         add_pkg_config_args(&mut cmd, "harfbuzz", "--cflags");
+        add_pkg_config_args(&mut cmd, "fontconfig", "--cflags");
         add_pkg_config_args(&mut cmd, "freetype2", "--libs");
         add_pkg_config_args(&mut cmd, "harfbuzz", "--libs");
+        add_pkg_config_args(&mut cmd, "fontconfig", "--libs");
 
         let status = cmd
             .status()
