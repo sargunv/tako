@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
   "crates/tako-app",
-  "tako-terminal",
+  "crates/tako-terminal",
 ]
 
 [workspace.package]

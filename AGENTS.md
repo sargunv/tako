@@ -8,8 +8,8 @@ with libghostty-vt as the terminal core.
 ```
 tako/
 ├── crates/
-│   └── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
-├── tako-terminal/      embeddable Qt Quick TerminalView package (C++ facade + Zig core)
+│   ├── tako-app/       cxx-qt bridge + `tako` binary entry (QML <-> Rust)
+│   └── tako-terminal/  embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── kcfg/               (future) takorc.kcfg schema + .kcfgc codegen
 ├── data/               (future) .desktop, metainfo, icons, D-Bus service file
 ├── ROADMAP.md          the authoritative design document
@@ -43,7 +43,7 @@ later builds skip it.
 
 Native system libraries (Qt6/KDE Frameworks, freetype, harfbuzz, fontconfig) are
 expected from the host for now; pixi/conda-forge packaging is deferred.
-`tako-terminal/build.rs` uses pkg-config to link system **freetype2** and
+`crates/tako-terminal/build.rs` uses pkg-config to link system **freetype2** and
 **harfbuzz** for the Zig core. Zig owns font loading, shaping, rasterization,
 cell metrics, atlas packing, and render-frame planning in production.
 
@@ -53,11 +53,11 @@ cell metrics, atlas packing, and render-frame planning in production.
 
 - **`unsafe_code` is denied workspace-wide.** The permitted exceptions are: a
   cxx-qt `#[cxx_qt::bridge]` module (`unsafe extern` blocks, edition 2024 FFI
-  syntax); `crates/tako-app/build.rs` and `tako-terminal/build.rs` (an `unsafe`
-  `cc_builder` closure — cxx-qt-build 0.9's only flag-passing API); the
+  syntax); `crates/tako-app/build.rs` and `crates/tako-terminal/build.rs` (an
+  `unsafe` `cc_builder` closure — cxx-qt-build 0.9's only flag-passing API); the
   production libghostty-vt row walker, PTY/session core, FreeType/HarfBuzz font
   service, glyph atlas, renderer planning, and Zig test harness in
-  `tako-terminal/src/*.zig` (the `core.zig` composition root plus its
+  `crates/tako-terminal/src/*.zig` (the `core.zig` composition root plus its
   `common`/`font`/`atlas`/`pty`/`session`/`snapshot`/`frame`/`input`/`selection`/`tests`
   modules). Scope every relaxation with a module-level `#![allow(unsafe_code)]`
   — never relax at workspace level.
@@ -77,29 +77,30 @@ cell metrics, atlas packing, and render-frame planning in production.
   which reads `view->plan()` during `synchronize()` (called with the GUI thread
   blocked — the only safe render-thread→item touch).
 - **`tako-terminal` is the embeddable component boundary.** Public API belongs
-  on the Qt/QML facade in `tako-terminal/src/tako_terminal_view.*`: properties,
-  signals, invokables, lifecycle, focus/input extraction, clipboard, DPR/window
-  hooks, QML registration, and render-thread Qt glue. The private implementation
-  ABI is `tako-terminal/src/tako_terminal_core.h`, implemented by the
-  `tako-terminal/src/*.zig` implementation core (entry `core.zig` plus its
-  modules). Zig owns libghostty-vt terminal creation/free, effects callbacks,
-  PTY/session lifecycle, shell bootstrap, keyboard/focus/paste/mouse-event
-  encoding, scrollback viewport navigation, font-family/default resolution to
-  concrete font paths, font-size reload requests, direct libghostty-vt mode/data
-  queries including OSC title/current-directory readout, keyboard selection
-  adjustment, select-all/semantic selection derives, selection
-  formatting/copy-out, the libghostty-vt render-state handle, render-state
-  row/cell walking, live default fg/bg/cursor colors, default cursor
-  style/blink, and terminal-derived flat geometry for cell backgrounds, text
-  decorations, and cursor, plus final text-glyph foreground/visibility
-  resolution, font shaping/rasterization, shaped glyph buffers, cell metrics,
-  terminal/preedit text traversal, glyph atlas packing, preedit underline/cursor
-  geometry, final `FramePlan` metadata, and public vertex-buffer assembly.
-  Rendering is owned by the C++ `TakoTerminalRenderer` on Qt's render thread.
-  C++ must not call implementation font/snapshot helpers directly. `tako-app`
-  depends on `tako-terminal`, calls `tako_terminal::register_qml_types()`,
-  imports `org.tako.terminal`, and keeps app state/orchestration in Rust+cxx-qt.
-  Do not make the app or QML reach into backend internals.
+  on the Qt/QML facade in `crates/tako-terminal/src/tako_terminal_view.*`:
+  properties, signals, invokables, lifecycle, focus/input extraction, clipboard,
+  DPR/window hooks, QML registration, and render-thread Qt glue. The private
+  implementation ABI is `crates/tako-terminal/src/tako_terminal_core.h`,
+  implemented by the `crates/tako-terminal/src/*.zig` implementation core (entry
+  `core.zig` plus its modules). Zig owns libghostty-vt terminal creation/free,
+  effects callbacks, PTY/session lifecycle, shell bootstrap,
+  keyboard/focus/paste/mouse-event encoding, scrollback viewport navigation,
+  font-family/default resolution to concrete font paths, font-size reload
+  requests, direct libghostty-vt mode/data queries including OSC
+  title/current-directory readout, keyboard selection adjustment,
+  select-all/semantic selection derives, selection formatting/copy-out, the
+  libghostty-vt render-state handle, render-state row/cell walking, live default
+  fg/bg/cursor colors, default cursor style/blink, and terminal-derived flat
+  geometry for cell backgrounds, text decorations, and cursor, plus final
+  text-glyph foreground/visibility resolution, font shaping/rasterization,
+  shaped glyph buffers, cell metrics, terminal/preedit text traversal, glyph
+  atlas packing, preedit underline/cursor geometry, final `FramePlan` metadata,
+  and public vertex-buffer assembly. Rendering is owned by the C++
+  `TakoTerminalRenderer` on Qt's render thread. C++ must not call implementation
+  font/snapshot helpers directly. `tako-app` depends on `tako-terminal`, calls
+  `tako_terminal::register_qml_types()`, imports `org.tako.terminal`, and keeps
+  app state/orchestration in Rust+cxx-qt. Do not make the app or QML reach into
+  backend internals.
 - **Terminal theme/cursor defaults go through libghostty-vt.** The Qt facade
   exposes default `foregroundColor`, `backgroundColor`, `cursorColor`,
   full-table `colorPalette`, `cursorStyle`, and `cursorBlink`; Zig applies them
@@ -159,8 +160,9 @@ cell metrics, atlas packing, and render-frame planning in production.
 - **The ghostty pin must carry the full libghostty-vt C API** (`render.h`,
   `terminal.h`, `build_info.h`, static-lib build). The latest stable tag
   (v1.3.1) lacks these — they landed upstream on `main` after v1.3.1. Tako pins
-  an upstream `main` commit in `tako-terminal/build.rs`; bump it deliberately
-  and re-verify the C headers, Zig imports, and C++ enum/include surfaces.
+  an upstream `main` commit in `crates/tako-terminal/build.rs`; bump it
+  deliberately and re-verify the C headers, Zig imports, and C++ enum/include
+  surfaces.
 - **cxx-qt-build does not register hand-written C++ `QML_ELEMENT` classes.** Its
   compiled `org.tako` QML module only registers types generated from the cxx-qt
   bridge (`#[qml_element]`). A C++ `QQuickItem` subclass added via
@@ -185,24 +187,24 @@ cell metrics, atlas packing, and render-frame planning in production.
   UI plumbing unless the project deliberately abandons Qt Quick/Kirigami or a
   future Rust Qt binding provides complete, idiomatic coverage.
 - **C++ terminal facade code includes libghostty-vt enum headers.** The C++
-  `tako-terminal/src/tako_terminal_view.cpp` pulls in `<ghostty/vt/key/event.h>`
-  and `<ghostty/vt/mouse/event.h>` for the enum constants (`GHOSTTY_KEY_*`,
-  `GHOSTTY_MODS_*`, `GHOSTTY_MOUSE_*`). It also includes
-  `<ghostty/vt/selection.h>` for `GHOSTTY_SELECTION_ADJUST_*`; because Qt
-  defines `emit` as a macro and `selection.h` has a field named `emit`, wrap
+  `crates/tako-terminal/src/tako_terminal_view.cpp` pulls in
+  `<ghostty/vt/key/event.h>` and `<ghostty/vt/mouse/event.h>` for the enum
+  constants (`GHOSTTY_KEY_*`, `GHOSTTY_MODS_*`, `GHOSTTY_MOUSE_*`). It also
+  includes `<ghostty/vt/selection.h>` for `GHOSTTY_SELECTION_ADJUST_*`; because
+  Qt defines `emit` as a macro and `selection.h` has a field named `emit`, wrap
   that include in `#pragma push_macro("emit")` / `#undef emit` /
-  `#pragma pop_macro("emit")`. `tako-terminal/build.rs` resolves/fetches the
-  include path and passes it via `CxxQtBuilder::include_dir`. If you add new
+  `#pragma pop_macro("emit")`. `crates/tako-terminal/build.rs` resolves/fetches
+  the include path and passes it via `CxxQtBuilder::include_dir`. If you add new
   enum usage to C++, keep the pinned Ghostty headers in sync with the Zig
   imports.
 - **Terminal ABI structs are terminal-owned, not hand-mirrored.**
-  `tako-terminal/src/tako_terminal_core.h` defines the public C++↔Zig terminal
-  ABI structs (`TakoTerminalOptions`, `TakoTerminalScrollbarState`,
+  `crates/tako-terminal/src/tako_terminal_core.h` defines the public C++↔Zig
+  terminal ABI structs (`TakoTerminalOptions`, `TakoTerminalScrollbarState`,
   `TakoTerminalBytes`) and is imported directly by the Zig core (`common.zig`
-  centralizes the `@cImport`). `tako-terminal/src/tako_terminal_frame.h` defines
-  `Vertex` and `FramePlan` for the frame ABI, with static layout assertions.
-  `tako-terminal/src/tako_terminal_backend.h` defines private Zig-only
-  implementation structs (`TakoTerminalSurfaceOptions`,
+  centralizes the `@cImport`). `crates/tako-terminal/src/tako_terminal_frame.h`
+  defines `Vertex` and `FramePlan` for the frame ABI, with static layout
+  assertions. `crates/tako-terminal/src/tako_terminal_backend.h` defines private
+  Zig-only implementation structs (`TakoTerminalSurfaceOptions`,
   `TakoTerminalCellMetrics`, frame snapshot rows/cells,
   `TakoTerminalShapedGlyph`, `TakoTerminalShapedText`,
   `TakoTerminalRasterizedGlyph`). Zig owns live grid dimensions, pixel-to-grid

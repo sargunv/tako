@@ -183,9 +183,9 @@ commit, bind against it, bump deliberately.
 
 ```
 tako/
-├── tako-terminal/      # embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── crates/
 │   ├── tako-app/       # Rust app model + cxx-qt/QML host; depends on tako-terminal
+│   ├── tako-terminal/  # embeddable Qt Quick TerminalView package (C++ facade + Zig core)
 ├── qml/                # Sidebar, tabs, splits, notification panel, settings UI
 ├── kcfg/               # takorc.kcfg schema + .kcfgc codegen
 ├── data/               # .desktop, metainfo, icons, D-Bus service file
@@ -717,8 +717,8 @@ Subtasks (✓ = landed in this repo):
       (fg/bg/inverse/faint), resize, HiDPI (`set_dpr`), four cursor styles
       (Block/Bar/Underline/ BlockHollow). Atlas/font rasterization caches. UV
       sentinel for flat quads.
-- [x] **Effects layer** (`tako-terminal/src/core.zig`): `write_pty`, `bell`,
-      `title_changed`, `pwd_changed`, `xtversion`, `enquiry`,
+- [x] **Effects layer** (`crates/tako-terminal/src/core.zig`): `write_pty`,
+      `bell`, `title_changed`, `pwd_changed`, `xtversion`, `enquiry`,
       `device_attributes` (DA1/DA2/DA3), `size` (XTWINOPS), `color_scheme` (CSI
       ? 996 n). Identity = "tako 0.1.0", DA1 = VT220 conformance + ANSI color
       (intentionally better than ghostling, which registers no effects and
