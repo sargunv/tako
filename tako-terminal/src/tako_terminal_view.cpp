@@ -485,13 +485,10 @@ void TakoTerminalView::restart() {
 
 void TakoTerminalView::pumpAndRender() {
     if (!m_session) return;
-    // Clear any pending wake bytes so the level-triggered notifier settles,
-    // then advance the terminal. tick() reports whether a new frame was
-    // actually produced; if not, skip update() and the GPU stays idle.
-    // (Sizing is event-driven via geometryChange + onDprChanged — no polling
-    // here. A DPR change forces a replan inside tick even if the Zig-owned grid
-    // size is unchanged, so the GL viewport refreshes.)
-    tako_terminal_session_drain_notify(m_session);
+    // tick() reports whether a new frame was actually produced; if not, skip
+    // update() and the GPU stays idle. Sizing is event-driven via geometryChange
+    // and onDprChanged; a DPR change forces a replan inside tick even when the
+    // grid size is unchanged.
     const bool changed = tako_terminal_session_tick(m_session, &m_plan);
     flushHostState();
     flushScrollbarState();
@@ -1040,11 +1037,6 @@ bool selection_adjustment_for_qt_key(int key, uint32_t *out) {
     }
 }
 
-// Pick a GhosttyMouseAction for a press/release/move.
-uint32_t mouse_action_press()   { return GHOSTTY_MOUSE_ACTION_PRESS; }
-uint32_t mouse_action_release() { return GHOSTTY_MOUSE_ACTION_RELEASE; }
-uint32_t mouse_action_motion()  { return GHOSTTY_MOUSE_ACTION_MOTION; }
-
 // Translate Qt::MouseButton to GhosttyMouseButton. Returns 0 (UNKNOWN) for
 // "no button" (used for motion events).
 uint32_t qt_button_to_ghostty(Qt::MouseButtons b) {
@@ -1109,7 +1101,7 @@ void TakoTerminalView::mousePressEvent(QMouseEvent *e) {
         const float dpr = windowDpr();
         const QPointF p = e->position();
         tako_terminal_session_mouse_event(
-            m_session, mouse_action_press(), qt_button_to_ghostty(e->button()),
+            m_session, GHOSTTY_MOUSE_ACTION_PRESS, qt_button_to_ghostty(e->button()),
             static_cast<float>(p.x()) * dpr,
             static_cast<float>(p.y()) * dpr,
             qt_mods_to_ghostty(e->modifiers()));
@@ -1160,7 +1152,7 @@ void TakoTerminalView::mouseReleaseEvent(QMouseEvent *e) {
         const float dpr = windowDpr();
         const QPointF p = e->position();
         tako_terminal_session_mouse_event(
-            m_session, mouse_action_release(),
+            m_session, GHOSTTY_MOUSE_ACTION_RELEASE,
             qt_button_to_ghostty(e->button()),
             static_cast<float>(p.x()) * dpr,
             static_cast<float>(p.y()) * dpr,
@@ -1202,7 +1194,7 @@ void TakoTerminalView::mouseMoveEvent(QMouseEvent *e) {
         const float dpr = windowDpr();
         const QPointF p = e->position();
         tako_terminal_session_mouse_event(
-            m_session, mouse_action_motion(), /*button=*/0,
+            m_session, GHOSTTY_MOUSE_ACTION_MOTION, /*button=*/0,
             static_cast<float>(p.x()) * dpr,
             static_cast<float>(p.y()) * dpr,
             qt_mods_to_ghostty(e->modifiers()));
@@ -1261,12 +1253,12 @@ void TakoTerminalView::wheelEvent(QWheelEvent *e) {
             const float dpr = windowDpr();
             const QPointF p = e->position();
             tako_terminal_session_mouse_event(
-                m_session, mouse_action_press(), btn,
+                m_session, GHOSTTY_MOUSE_ACTION_PRESS, btn,
                 static_cast<float>(p.x()) * dpr,
                 static_cast<float>(p.y()) * dpr,
                 qt_mods_to_ghostty(e->modifiers()));
             tako_terminal_session_mouse_event(
-                m_session, mouse_action_release(), btn,
+                m_session, GHOSTTY_MOUSE_ACTION_RELEASE, btn,
                 static_cast<float>(p.x()) * dpr,
                 static_cast<float>(p.y()) * dpr,
                 qt_mods_to_ghostty(e->modifiers()));

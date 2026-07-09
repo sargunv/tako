@@ -53,6 +53,7 @@ fn main() {
         "frame.zig",
         "input.zig",
         "selection.zig",
+        "bootstrap.zig",
         "tests.zig",
     ] {
         println!(

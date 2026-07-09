@@ -51,7 +51,6 @@ void tako_terminal_session_destroy(TakoTerminalSession *session);
 bool tako_terminal_session_tick(TakoTerminalSession *session, FramePlan *out);
 int32_t tako_terminal_session_notify_fd(TakoTerminalSession *session);
 int32_t tako_terminal_session_exited(TakoTerminalSession *session);
-void tako_terminal_session_drain_notify(TakoTerminalSession *session);
 
 void tako_terminal_session_resize_pixels(TakoTerminalSession *session,
                                          uint32_t width_px,
@@ -134,11 +133,6 @@ int32_t tako_terminal_session_selection_autoscroll_tick(TakoTerminalSession *ses
                                                         float x_px,
                                                         float y_px,
                                                         uint16_t mods);
-uintptr_t tako_terminal_session_selection_end(TakoTerminalSession *session,
-                                              float x_px,
-                                              float y_px,
-                                              uint8_t *out_buf,
-                                              uintptr_t cap);
 uintptr_t tako_terminal_session_selection_text(TakoTerminalSession *session,
                                                uint8_t *out_buf,
                                                uintptr_t cap);

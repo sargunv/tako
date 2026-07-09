@@ -151,11 +151,6 @@ pub fn errnoIsAgain() bool {
     return value == c.EAGAIN or value == c.EWOULDBLOCK;
 }
 
-pub fn saturatingAddU32(a: u32, b: u32) u32 {
-    const max = std.math.maxInt(u32);
-    return if (b > max - a) max else a + b;
-}
-
 pub fn rgbToBackend(rgb: ghostty.GhosttyColorRgb) BackendRgb {
     return .{ .r = rgb.r, .g = rgb.g, .b = rgb.b };
 }

@@ -168,6 +168,8 @@ Current files:
 - `tako_terminal_backend.h`: private Zig implementation structs for resolved
   font creation options, cell metrics, frame snapshots, shaped text runs, and
   rasterized glyph bitmaps. The C++ facade must not include it.
+- `bootstrap.zig`: shared session construction and teardown used by the C ABI
+  and Zig tests. Owns ghostty/font/encoder/gesture bootstrap and rollback.
 - `core.zig`: implementation-core composition root and C ABI surface. It is the
   `zig build-obj` entry, owns the cross-cutting session lifecycle orchestrators
   (`session_new`/`destroy`/`tick`/`resize`), and defines every

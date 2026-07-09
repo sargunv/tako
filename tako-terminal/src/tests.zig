@@ -1,11 +1,9 @@
 const std = @import("std");
 const core = @import("core.zig");
+const bootstrap = @import("bootstrap.zig");
 const common = @import("common.zig");
-const font = @import("font.zig");
-const atlas = @import("atlas.zig");
 const selection = @import("selection.zig");
 const session = @import("session.zig");
-const input = @import("input.zig");
 
 const ghostty = common.ghostty;
 
@@ -17,92 +15,18 @@ const TestSession = struct {
     session: *TerminalSession,
 
     fn init(cols: u16, rows: u16) !TestSession {
-        const resolved_font = font.resolveFontPath(null, null) orelse return error.FontUnavailable;
-        defer common.allocator.free(resolved_font);
-
-        const surface_options = common.SurfaceOptions{
-            .font_path = resolved_font.ptr,
+        const sess = bootstrap.createSession(.{
+            .cols = cols,
+            .rows = rows,
             .pixel_height = 14,
             .dpr = 1.0,
-        };
-        const surface = font.fontCoreCreateWithOptions(&surface_options) orelse return error.FontCoreUnavailable;
-        errdefer font.fontCoreDestroy(surface);
-
-        var terminal: ghostty.GhosttyTerminal = null;
-        var result = ghostty.ghostty_terminal_new(null, &terminal, .{
-            .cols = cols,
-            .rows = rows,
             .max_scrollback = 200,
-        });
-        if (result != ghostty.GHOSTTY_SUCCESS or terminal == null) return error.TerminalUnavailable;
-        errdefer ghostty.ghostty_terminal_free(terminal);
-
-        var render_state: ghostty.GhosttyRenderState = null;
-        result = ghostty.ghostty_render_state_new(null, &render_state);
-        if (result != ghostty.GHOSTTY_SUCCESS or render_state == null) return error.RenderStateUnavailable;
-        errdefer ghostty.ghostty_render_state_free(render_state);
-
-        var key_encoder: ghostty.GhosttyKeyEncoder = null;
-        result = ghostty.ghostty_key_encoder_new(null, &key_encoder);
-        if (result != ghostty.GHOSTTY_SUCCESS or key_encoder == null) return error.KeyEncoderUnavailable;
-        errdefer ghostty.ghostty_key_encoder_free(key_encoder);
-
-        var key_event: ghostty.GhosttyKeyEvent = null;
-        result = ghostty.ghostty_key_event_new(null, &key_event);
-        if (result != ghostty.GHOSTTY_SUCCESS or key_event == null) return error.KeyEventUnavailable;
-        errdefer ghostty.ghostty_key_event_free(key_event);
-
-        var mouse_encoder: ghostty.GhosttyMouseEncoder = null;
-        result = ghostty.ghostty_mouse_encoder_new(null, &mouse_encoder);
-        if (result != ghostty.GHOSTTY_SUCCESS or mouse_encoder == null) return error.MouseEncoderUnavailable;
-        errdefer ghostty.ghostty_mouse_encoder_free(mouse_encoder);
-
-        var mouse_event: ghostty.GhosttyMouseEvent = null;
-        result = ghostty.ghostty_mouse_event_new(null, &mouse_event);
-        if (result != ghostty.GHOSTTY_SUCCESS or mouse_event == null) return error.MouseEventUnavailable;
-        errdefer ghostty.ghostty_mouse_event_free(mouse_event);
-
-        var selection_gesture: ghostty.GhosttySelectionGesture = null;
-        result = ghostty.ghostty_selection_gesture_new(null, &selection_gesture);
-        if (result != ghostty.GHOSTTY_SUCCESS or selection_gesture == null) return error.SelectionGestureUnavailable;
-        errdefer ghostty.ghostty_selection_gesture_free(selection_gesture, terminal);
-
-        const selection_press = selection.newSelectionEvent(@intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_PRESS)) orelse return error.SelectionEventUnavailable;
-        errdefer ghostty.ghostty_selection_gesture_event_free(selection_press);
-        const selection_drag = selection.newSelectionEvent(@intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_DRAG)) orelse return error.SelectionEventUnavailable;
-        errdefer ghostty.ghostty_selection_gesture_event_free(selection_drag);
-        const selection_release = selection.newSelectionEvent(@intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_RELEASE)) orelse return error.SelectionEventUnavailable;
-        errdefer ghostty.ghostty_selection_gesture_event_free(selection_release);
-        const selection_autoscroll_tick = selection.newSelectionEvent(@intCast(ghostty.GHOSTTY_SELECTION_GESTURE_EVENT_TYPE_AUTOSCROLL_TICK)) orelse return error.SelectionEventUnavailable;
-        errdefer ghostty.ghostty_selection_gesture_event_free(selection_autoscroll_tick);
-
-        const sess = try common.allocator.create(TerminalSession);
-        sess.* = .{
-            .terminal = terminal,
-            .render_state = render_state,
-            .surface = surface,
-            .cols = cols,
-            .rows = rows,
-            .pty = null,
-            .pty_response = std.ArrayList(u8).empty,
-            .key_encoder = key_encoder,
-            .key_event = key_event,
-            .mouse_encoder = mouse_encoder,
-            .mouse_event = mouse_event,
-            .selection_gesture = selection_gesture,
-            .selection_press = selection_press,
-            .selection_drag = selection_drag,
-            .selection_release = selection_release,
-            .selection_autoscroll_tick = selection_autoscroll_tick,
-            .glyph_atlas = atlas.OwnedGlyphAtlas.init(),
-        };
-        session.registerTerminalEffects(sess);
-        input.syncMouseGeometry(sess);
+        }) orelse return error.SessionUnavailable;
         return .{ .session = sess };
     }
 
     fn deinit(self: *TestSession) void {
-        core.tako_terminal_session_destroy(self.session);
+        bootstrap.destroySession(self.session);
     }
 
     fn write(self: *TestSession, bytes: []const u8) void {
