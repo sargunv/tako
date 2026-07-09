@@ -78,3 +78,38 @@ cell metrics, atlas packing, and render-frame planning in production.
 - **Prefer KDE-native integrations.** Use KDE/Qt facilities for settings,
   notifications, global shortcuts, activation/focus, theme colors/icons, file
   operations, and packaging. Avoid "portable" escape hatches.
+
+## Cursor Cloud specific instructions
+
+The VM snapshot already has the full toolchain installed. Standard commands live
+in "Dev tool commands" above (`mise install`, `cargo build`/`cargo test`,
+`mise run check`/`fix`, `mise run tako`, `mise run ui-smoke`). Run cargo through
+`mise exec -- cargo …` (or after `mise` is activated) so the pinned Rust 1.96.1
+/ Zig 0.15.2 and `QT_VERSION_MAJOR=6` are in scope. Notes below cover only the
+non-obvious, environment-specific gotchas.
+
+- **Linker must be `lld` (or mold), not `ld.gold`.** `cxx-qt-build` (via
+  `qt-build-utils`) picks a linker at build-script time: it prefers `lld`, else
+  falls back to the deprecated `ld.gold`, which fails this project with
+  `undefined reference to 'cxx_qt_init_crate_*'` / `cxx_qt_init_qml_module_*`.
+  `lld` is pre-installed for this reason. The choice is cached in the
+  build-script output, so if you ever hit that link error, confirm `lld` is on
+  `PATH` and run `cargo clean` before rebuilding (a plain rebuild keeps the
+  stale gold choice).
+- **`cc`/`c++` default to GCC, not clang.** The `update-alternatives` defaults
+  were switched to gcc/g++ because the installed clang 18 cannot find the GCC 13
+  libstdc++ headers (`fatal error: 'algorithm' file not found`) when `cxx` and
+  the Qt facade compile.
+- **Qt6 + KF6 Kirigami come from the KDE neon repo** (Ubuntu 24.04 ships only
+  KF5/Qt 6.4, too old for KF6 Kirigami used by `import org.kde.kirigami`). The
+  app links system freetype2/harfbuzz/fontconfig via pkg-config.
+- **Running the GUI needs a display and uses software GL.** There is no GPU; Qt
+  Quick RHI renders via mesa llvmpipe. Launch against the Desktop pane X server
+  with an `XDG_RUNTIME_DIR` set, e.g.:
+  `DISPLAY=:1 XDG_RUNTIME_DIR=/tmp/runtime-ubuntu mise exec -- cargo run -p tako-app`.
+  There is no window manager, so the window appears undecorated/maximized. The
+  embedded terminal spawns `$SHELL`; verify end-to-end by typing a command (e.g.
+  `echo`, `ls`) into the dark terminal pane.
+- **First terminal build is slow.** `tako-terminal`'s build fetches the pinned
+  ghostty tarball and runs `zig build` (~2 min); results cache under
+  `~/.cache/tako/ghostty-vt/<commit>/`, so later builds are fast.
