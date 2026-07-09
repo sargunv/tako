@@ -6,68 +6,6 @@
 //! in `tako_terminal_view.*` and `core.zig`.
 
 #![allow(unsafe_code)]
-// The folded libghostty-vt helper modules are test-only while the C++/Zig
-// boundary takes ownership of production terminal behavior.
-#![allow(dead_code, unused_imports)]
-#![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
-
-pub(crate) mod ffi {
-    include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-}
-
-pub(crate) mod frame_ffi {
-    include!(concat!(env!("OUT_DIR"), "/frame_bindings.rs"));
-}
-
-#[cfg(test)]
-pub(crate) mod effects;
-#[cfg(test)]
-pub(crate) mod gesture;
-#[cfg(test)]
-pub(crate) mod grid_ref;
-#[cfg(test)]
-pub(crate) mod input;
-#[cfg(test)]
-pub(crate) mod modes;
-#[cfg(test)]
-pub(crate) mod point;
-#[cfg(test)]
-pub(crate) mod selection;
-pub(crate) mod snapshot;
-#[cfg(test)]
-pub(crate) mod terminal;
-
-#[cfg(test)]
-use core::fmt;
-
-/// A failed libghostty-vt call. Wraps the raw `GhosttyResult` code.
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Error {
-    pub code: ffi::GhosttyResult,
-}
-
-#[cfg(test)]
-impl Error {
-    /// Assert-style helper: turns a non-`GHOSTTY_SUCCESS` result into `Err`.
-    pub fn from_result(code: ffi::GhosttyResult) -> Result<(), Self> {
-        if code == ffi::GhosttyResult_GHOSTTY_SUCCESS {
-            Ok(())
-        } else {
-            Err(Self { code })
-        }
-    }
-}
-
-#[cfg(test)]
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "libghostty-vt error code {}", self.code)
-    }
-}
-
-#[cfg(test)]
-impl std::error::Error for Error {}
 
 unsafe extern "C" {
     fn tako_register_qml_types();
@@ -84,25 +22,62 @@ pub fn register_qml_types() {
 }
 
 #[cfg(test)]
-mod build_smoke {
-    use crate::ffi;
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
 
     #[test]
-    fn ffi_links_and_build_info_succeeds() {
-        let mut value: usize = 0;
-        let result = unsafe {
-            ffi::ghostty_build_info(
-                ffi::GhosttyBuildInfo_GHOSTTY_BUILD_INFO_VERSION_MAJOR,
-                &mut value as *mut usize as *mut core::ffi::c_void,
-            )
-        };
-        assert_eq!(
-            result,
-            ffi::GhosttyResult_GHOSTTY_SUCCESS,
-            "ghostty_build_info call failed - libghostty-vt link is broken"
+    fn zig_core_tests_pass() {
+        let terminal_src = env!("TAKO_TERMINAL_SRC");
+        let ghostty_include = env!("TAKO_GHOSTTY_INCLUDE");
+        let ghostty_lib_dir = env!("TAKO_GHOSTTY_LIB_DIR");
+        let core_zig = Path::new(terminal_src).join("core.zig");
+
+        let mut cmd = Command::new("zig");
+        cmd.arg("test")
+            .arg(&core_zig)
+            .arg("-lc")
+            .arg("-I")
+            .arg(ghostty_include)
+            .arg("-I")
+            .arg(terminal_src)
+            .arg("-L")
+            .arg(ghostty_lib_dir)
+            .arg("-lghostty-vt");
+
+        add_pkg_config_args(&mut cmd, "freetype2", "--cflags");
+        add_pkg_config_args(&mut cmd, "harfbuzz", "--cflags");
+        add_pkg_config_args(&mut cmd, "freetype2", "--libs");
+        add_pkg_config_args(&mut cmd, "harfbuzz", "--libs");
+
+        let status = cmd
+            .status()
+            .expect("failed to run zig test for tako-terminal core");
+        assert!(
+            status.success(),
+            "zig test failed for {}",
+            core_zig.display()
         );
     }
-}
 
-#[cfg(test)]
-mod snapshot_tests;
+    fn add_pkg_config_args(cmd: &mut Command, package: &str, mode: &str) {
+        let output = Command::new("pkg-config")
+            .arg(mode)
+            .arg(package)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run pkg-config for {package}: {e}"));
+        assert!(
+            output.status.success(),
+            "pkg-config {mode} failed for {package}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout)
+            .unwrap_or_else(|e| panic!("pkg-config returned non-UTF8 output: {e}"));
+        for flag in stdout.split_whitespace() {
+            if flag == "-pthread" {
+                continue;
+            }
+            cmd.arg(flag);
+        }
+    }
+}

@@ -39,9 +39,7 @@ The project uses [mise](https://mise.jdx.dev) to bootstrap the toolchain
 first build fetches the pinned ghostty tarball (~37 MB) and runs
 `zig build -Demit-lib-vt` (several minutes) when the cached static library is
 missing. The result is cached under `~/.cache/tako/ghostty-vt/<commit>/` so
-later builds skip it. The same build script generates Rust bindgen bindings for
-the test-only libghostty-vt wrappers; bindgen needs `libclang` (Fedora:
-`clang-devel`, or the runtime `clang-libs` suffices).
+later builds skip it.
 
 Native system libraries (Qt6/KDE Frameworks, freetype, harfbuzz, fontconfig) are
 expected from the host for now; pixi/conda-forge packaging is deferred.
@@ -57,18 +55,15 @@ cell metrics, atlas packing, and render-frame planning in production.
   cxx-qt `#[cxx_qt::bridge]` module (`unsafe extern` blocks, edition 2024 FFI
   syntax); `crates/tako-app/build.rs` and `tako-terminal/build.rs` (an `unsafe`
   `cc_builder` closure — cxx-qt-build 0.9's only flag-passing API); the
-  test-only libghostty-vt wrappers in
-  `tako-terminal/src/{terminal,effects,gesture,grid_ref,input,modes,point,selection,snapshot}.rs`;
-  the production libghostty-vt row walker, PTY/session core, FreeType/HarfBuzz
-  font service, glyph atlas, and renderer planning in
+  production libghostty-vt row walker, PTY/session core, FreeType/HarfBuzz font
+  service, glyph atlas, renderer planning, and Zig test harness in
   `tako-terminal/src/core.zig`. Scope every relaxation with a module-level
   `#![allow(unsafe_code)]` — never relax at workspace level.
 - **The terminal backend is single-threaded by construction.** Zig
   `TerminalSession` owns the live `GhosttyTerminal` plus PTY/session state on
   the GUI thread; effects fire synchronously inside `ghostty_terminal_vt_write`
-  on that same thread and append to session-local buffers. The Rust
-  `Terminal`/effects wrappers are test scaffolding only. Don't add `Send` bounds
-  or thread-spawning here without reworking the ownership model.
+  on that same thread and append to session-local buffers. Don't add `Send`
+  bounds or thread-spawning here without reworking the ownership model.
 - **The terminal implementation object is GUI-thread-owned; `createRenderer` is
   not.** `QQuickFramebufferObject::createRenderer()` runs on the QSG render
   thread. The implementation object (`TerminalSession` in Zig) and its
@@ -146,9 +141,8 @@ cell metrics, atlas packing, and render-frame planning in production.
   snapshot cell with final `text_visible` and `text_fg`, shapes UTF-8 text runs,
   rasterizes missing glyph IDs, emits all terminal/preedit/cursor quads,
   finalizes `FramePlan` metadata, records `TerminalSession.last_plan`, and
-  clears the Zig-owned render state's global dirty flag. The Rust `terminal.rs`
-  wrapper and sibling libghostty helpers are compiled only for tests; production
-  must not add new uses of them.
+  clears the Zig-owned render state's global dirty flag. Integration-style
+  terminal-core tests live in Zig and run through `cargo test -p tako-terminal`.
 - **Text decoration rendering is view-only and Zig-owned.**
   `TakoTerminalFrameSnapshot` style data comes from libghostty-vt render state;
   Zig turns underline/strikethrough/overline into flat-color quads using the
@@ -164,7 +158,7 @@ cell metrics, atlas packing, and render-frame planning in production.
   `terminal.h`, `build_info.h`, static-lib build). The latest stable tag
   (v1.3.1) lacks these — they landed upstream on `main` after v1.3.1. Tako pins
   an upstream `main` commit in `tako-terminal/build.rs`; bump it deliberately
-  and re-verify the C, Zig import, and bindgen surfaces.
+  and re-verify the C headers, Zig imports, and C++ enum/include surfaces.
 - **cxx-qt-build does not register hand-written C++ `QML_ELEMENT` classes.** Its
   compiled `org.tako` QML module only registers types generated from the cxx-qt
   bridge (`#[qml_element]`). A C++ `QQuickItem` subclass added via
@@ -188,14 +182,6 @@ cell metrics, atlas packing, and render-frame planning in production.
   sidebars, notification UI, settings). Do not replace QML with imperative Rust
   UI plumbing unless the project deliberately abandons Qt Quick/Kirigami or a
   future Rust Qt binding provides complete, idiomatic coverage.
-- **bindgen needs the clang resource include path.** On systems with
-  `clang-libs` but not `clang-devel` (e.g. Fedora default), libclang can't
-  locate `<limits.h>` and bindgen fails with
-  `fatal error: 'limits.h' file not
-  found`. `tako-terminal/build.rs` probes
-  `/usr/lib/clang/<major>/include/` and passes `-resource-dir=<parent>` so the
-  built-in headers are found. Adding new libghostty-vt headers that pull in more
-  stdarg/stdint types can re-trip this on a fresh toolchain.
 - **C++ terminal facade code includes libghostty-vt enum headers.** The C++
   `tako-terminal/src/tako_terminal_view.cpp` pulls in `<ghostty/vt/key/event.h>`
   and `<ghostty/vt/mouse/event.h>` for the enum constants (`GHOSTTY_KEY_*`,
@@ -221,11 +207,9 @@ cell metrics, atlas packing, and render-frame planning in production.
   sizing, dirty/cursor frame-state capture, row/cell snapshot capture, final
   text glyph foreground/visibility, font family/default resolution, text
   positioning, shaping/rasterization, glyph atlas packing, final `Vertex`
-  assembly, and full mouse/selection geometry. `tako-terminal/build.rs` no
-  longer bindgens this private implementation header for Rust. The C++ facade
-  consumes `tako_terminal_core.h` and `tako_terminal_frame.h`; it must not
-  include `tako_terminal_backend.h` or call Zig's internal font helpers
-  directly.
+  assembly, and full mouse/selection geometry. The C++ facade consumes
+  `tako_terminal_core.h` and `tako_terminal_frame.h`; it must not include
+  `tako_terminal_backend.h` or call Zig's internal font helpers directly.
 - **PTY output is event-driven, not polled.** Zig `PtySession` owns the PTY
   master fd and child process. The C++ side watches that master fd with
   `QSocketNotifier`; on wake it calls `tako_terminal_session_drain_notify`
@@ -236,10 +220,9 @@ cell metrics, atlas packing, and render-frame planning in production.
   builds a new frame plan if needed, using Zig-owned font shaping,
   rasterization, and atlas data. Zig owns the session's current `FramePlan` copy
   and returns it on idle/sync-output ticks. A 100 ms safety `QTimer` backstops
-  notifier misses and drives the env-test `TAKO_AUTORUN` harness, whose one-shot
-  command/delay state lives in Zig `TerminalSession`.
-  `tako_terminal_session_tick` returns `bool` — `true` only when a new frame was
-  built — so the C++ skips `update()` (no GPU work) on idle ticks.
+  notifier misses. `tako_terminal_session_tick` returns `bool` — `true` only
+  when a new frame was built — so the C++ skips `update()` (no GPU work) on idle
+  ticks.
 - **Wayland fractional DPR is delivered late; react to
   `ItemDevicePixelRatioHasChanged`.** A window is created with the integer DPR
   (e.g. 2) and the compositor's preferred fractional scale (e.g. 1.7) arrives

@@ -15,7 +15,6 @@ const GHOSTTY_OPTIMIZE: &str = "ReleaseFast";
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let terminal_src = manifest_dir.join("src");
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
     let ghostty = find_ghostty_artifacts().unwrap_or_else(|| {
         let artifacts = fetch_and_build_ghostty_vt();
         assert!(
@@ -24,8 +23,6 @@ fn main() {
         );
         artifacts
     });
-    generate_ghostty_bindings(&ghostty.include, &out_dir);
-    generate_frame_bindings(&terminal_src, &out_dir);
     build_zig_terminal_core(&terminal_src, &ghostty.include);
 
     unsafe {
@@ -73,65 +70,19 @@ fn main() {
     println!("cargo:rustc-link-lib=static=ghostty-vt");
     link_pkg_config_libs("freetype2");
     link_pkg_config_libs("harfbuzz");
+    println!(
+        "cargo:rustc-env=TAKO_TERMINAL_SRC={}",
+        terminal_src.display()
+    );
+    println!(
+        "cargo:rustc-env=TAKO_GHOSTTY_INCLUDE={}",
+        ghostty.include.display()
+    );
+    println!(
+        "cargo:rustc-env=TAKO_GHOSTTY_LIB_DIR={}",
+        ghostty.lib_dir().display()
+    );
     println!("cargo:rerun-if-env-changed=TAKO_GHOSTTY_CACHE");
-}
-
-fn generate_ghostty_bindings(include_dir: &Path, out_dir: &Path) {
-    let header = include_dir.join("ghostty").join("vt.h");
-    let mut builder = bindgen::Builder::default()
-        .header(header.to_string_lossy().into_owned())
-        .clang_arg(format!("-I{}", include_dir.display()))
-        .derive_default(true)
-        .generate_comments(false);
-
-    if let Some(clang_inc) = find_clang_resource_include() {
-        eprintln!(
-            "[tako-terminal/build] using clang resource include: {}",
-            clang_inc.display()
-        );
-        if let Some(resource_dir) = clang_inc.parent() {
-            builder = builder.clang_arg(format!("-resource-dir={}", resource_dir.display()));
-        }
-    } else {
-        eprintln!("[tako-terminal/build] no clang resource include found");
-    }
-
-    let bindings = builder
-        .generate()
-        .expect("bindgen failed to generate libghostty-vt bindings");
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .expect("failed to write bindings.rs");
-
-    println!("cargo:rerun-if-changed={}", header.display());
-}
-
-fn generate_frame_bindings(terminal_src: &Path, out_dir: &Path) {
-    let header = terminal_src.join("tako_terminal_frame.h");
-    let mut builder = bindgen::Builder::default()
-        .header(header.to_string_lossy().into_owned())
-        .clang_arg("-x")
-        .clang_arg("c++")
-        .clang_arg(format!("-I{}", terminal_src.display()))
-        .allowlist_type("Vertex")
-        .allowlist_type("FramePlan")
-        .derive_default(true)
-        .generate_comments(false);
-
-    if let Some(clang_inc) = find_clang_resource_include()
-        && let Some(resource_dir) = clang_inc.parent()
-    {
-        builder = builder.clang_arg(format!("-resource-dir={}", resource_dir.display()));
-    }
-
-    let bindings = builder
-        .generate()
-        .expect("bindgen failed to generate frame ABI bindings");
-    bindings
-        .write_to_file(out_dir.join("frame_bindings.rs"))
-        .expect("failed to write frame_bindings.rs");
-
-    println!("cargo:rerun-if-changed={}", header.display());
 }
 
 fn build_zig_terminal_core(terminal_dir: &Path, ghostty_include: &Path) {
@@ -286,30 +237,6 @@ fn ghostty_cache_roots() -> Vec<PathBuf> {
         );
     }
     roots
-}
-
-fn find_clang_resource_include() -> Option<PathBuf> {
-    let base = PathBuf::from("/usr/lib/clang");
-    if let Ok(entries) = std::fs::read_dir(&base) {
-        let mut best: Option<(u32, PathBuf)> = None;
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str()
-                && let Ok(major) = name.parse::<u32>()
-            {
-                let inc = entry.path().join("include");
-                if inc.is_dir() {
-                    match best {
-                        Some((m, _)) if m >= major => {}
-                        _ => best = Some((major, inc)),
-                    }
-                }
-            }
-        }
-        if let Some((_, p)) = best {
-            return Some(p);
-        }
-    }
-    None
 }
 
 fn download_tarball(dest: &Path) {

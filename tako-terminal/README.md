@@ -177,7 +177,7 @@ Current files:
   selection adjustment, select-all/semantic selection derives, DEC 2026
   synchronized-output gating, and selection formatting/copy-out. Move real
   terminal responsibilities here without changing the facade API.
-- `terminal.rs` and the Rust libghostty helper wrappers are test-only
-  scaffolding. Production terminal behavior, font shaping/rasterization, atlas
-  work, text positioning, cursor presentation, and preedit flat geometry live in
-  Zig.
+- `core.zig` also carries the terminal-core integration tests.
+  `cargo test -p
+  tako-terminal` runs `zig test` through the Rust shim so the
+  normal workspace test command covers the Zig implementation.

@@ -125,12 +125,11 @@ glyph foreground/visibility, shapes UTF-8 text runs, rasterizes missing glyphs,
 packs the glyph atlas, finalizes public `FramePlan` metadata, and emits terminal
 background, text decoration, preedit underline/cursor, terminal cursor quads,
 and final vertices. `tako-app` depends on `tako-terminal` and imports
-`org.tako.terminal` like any other Qt component. The old Rust
-`Terminal`/`RenderState` owners and Rust render-state row walker are compiled
-only for tests; production terminal handles, row walking, font service, text
-positioning, cursor quads, and frame metadata finalization live in Zig. Keep the
-Qt/QML API stable and move implementation work behind `tako_terminal_core.h`
-rather than changing `tako-app`.
+`org.tako.terminal` like any other Qt component. Terminal-core behavior and
+integration-style tests now live in Zig; the Rust crate is only the Cargo/QML
+registration shim while the app is built by Cargo. Keep the Qt/QML API stable
+and move implementation work behind `tako_terminal_core.h` rather than changing
+`tako-app`.
 
 Configuration is app/model-owned, not terminal-owned. `TerminalView` exposes
 normal Qt properties for terminal defaults (font, colors, palette, cursor,
@@ -693,7 +692,8 @@ something dogfoodable.
 ### Phase 0 — Render spike & stack proof _(~1–2 weeks, GO/NO-GO)_
 
 - [x] cxx-qt hello world: one QML window calling into Rust.
-- [x] `bindgen` on `libghostty-vt/include/ghostty/vt.h`; link `libghostty-vt.a`.
+- [x] Fetch/build/link pinned `libghostty-vt.a` and validate the C/Zig/Qt build
+      path.
 - [x] Embed a Terminal, drive a PTY, snapshot RenderState, render dirty rows in
       a `QQuickItem` via Qt RHI. Glyph atlas: one freetype+harfbuzz pass per
       font.

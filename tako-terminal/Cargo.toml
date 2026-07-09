@@ -9,7 +9,6 @@ description = "Embeddable Qt Quick terminal component."
 path = "src/lib.rs"
 
 [build-dependencies]
-bindgen = "0.71"
 cxx-qt-build = { version = "0.9", features = ["link_qt_object_files"] }
 
 [lints]
