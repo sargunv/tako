@@ -16,6 +16,7 @@ fn main() {
             "qml/TerminalSurface.qml",
             "qml/PlaceholderSurface.qml",
         ]))
+        .files(["src/shell.rs"])
         .qt_module("Gui")
         .qt_module("Quick")
         .qt_module("QuickControls2")

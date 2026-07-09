@@ -20,6 +20,9 @@ pub fn run() {
     // loading QML.
     tako_terminal::register_qml_types();
 
+    // Register cxx-qt generated QML types (AppShell) from this crate's module.
+    cxx_qt::init_qml_module!("org.tako");
+
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
 

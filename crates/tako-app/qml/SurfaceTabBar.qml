@@ -15,69 +15,43 @@ Controls.Control {
     contentItem: RowLayout {
         spacing: 0
 
-        Controls.TabBar {
-            Layout.fillWidth: true
-            currentIndex: {
-                const surfaces = tabBarShell.workspace.surfaces;
-                for (let i = 0; i < surfaces.length; ++i) {
-                    if (surfaces[i].id === tabBarShell.selectedSurfaceId) {
-                        return i;
+        Repeater {
+            model: tabBarShell.workspace.surfaces
+
+            Controls.ItemDelegate {
+                id: tabButton
+
+                required property var modelData
+
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 2
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 12
+                padding: Kirigami.Units.smallSpacing
+                highlighted: modelData.id === tabBarShell.selectedSurfaceId
+                onClicked: tabBarShell.shell.selectSurface(tabBarShell.workspace.id, modelData.id)
+
+                contentItem: RowLayout {
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        text: tabButton.modelData.title
+                        elide: Text.ElideRight
+                        font.bold: tabButton.highlighted
                     }
-                }
-                return 0;
-            }
 
-            Repeater {
-                model: tabBarShell.workspace.surfaces
+                    Controls.ToolButton {
+                        id: closeButton
 
-                Controls.TabButton {
-                    id: tabButton
+                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                        flat: true
+                        focusPolicy: Qt.NoFocus
+                        icon.name: "window-close"
+                        Accessible.name: qsTr("Close Tab")
+                        onClicked: tabBarShell.shell.closeSurface(tabBarShell.workspace.id, tabButton.modelData.id)
 
-                    required property var modelData
-
-                    text: modelData.title
-                    checked: modelData.id === tabBarShell.selectedSurfaceId
-                    leftPadding: Kirigami.Units.mediumSpacing
-                    rightPadding: Kirigami.Units.smallSpacing
-                    topPadding: Kirigami.Units.smallSpacing
-                    bottomPadding: Kirigami.Units.smallSpacing
-                    onClicked: tabBarShell.shell.selectSurface(tabBarShell.workspace.id, modelData.id)
-
-                    contentItem: RowLayout {
-                        spacing: Kirigami.Units.smallSpacing
-
-                        Controls.Label {
-                            Layout.fillWidth: true
-                            text: tabButton.text
-                            elide: Text.ElideRight
-                        }
-
-                        Item {
-                            id: closeButton
-
-                            Layout.alignment: Qt.AlignVCenter
-                            Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
-                            Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
-                            Accessible.role: Accessible.Button
-                            Accessible.name: qsTr("Close Tab")
-
-                            Kirigami.Icon {
-                                anchors.centerIn: parent
-                                width: Kirigami.Units.iconSizes.small
-                                height: Kirigami.Units.iconSizes.small
-                                source: "window-close"
-                                color: closeMouse.containsMouse ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.textColor
-                                opacity: closeMouse.containsMouse || tabButton.checked ? 1 : 0.7
-                            }
-
-                            MouseArea {
-                                id: closeMouse
-
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                onClicked: tabBarShell.shell.closeSurface(tabBarShell.workspace.id, tabButton.modelData.id)
-                            }
-                        }
+                        // Keep the parent ItemDelegate from also selecting when closing.
+                        onPressed: closeButton.forceActiveFocus()
                     }
                 }
             }
@@ -86,5 +60,9 @@ Controls.Control {
         Item {
             Layout.fillWidth: true
         }
+    }
+
+    background: Rectangle {
+        color: Kirigami.Theme.backgroundColor
     }
 }
